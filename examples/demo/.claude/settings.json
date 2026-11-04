@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_subzero_subzero__*",
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit(REVIEW.md)"
+    ]
+  }
+}

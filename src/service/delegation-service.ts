@@ -1,0 +1,274 @@
+// @sigil implements design/delegation-service.sigil DelegationService
+//
+// The one entry every front end uses. It resolves the project root once per
+// process, runs the start-up sweep, connects TaskCore to PiDriver and TaskStore,
+// and owns the live task registry and the per-endpoint parallel limit.
+import {
+  getAgent,
+  resolveProjectRoot,
+  UnresolvedRootError,
+  type AgentDefinition,
+  type RootSources,
+} from '../config/agent-config.js';
+import { Task, TaskCore } from '../core/task-core.js';
+import { ENDED_STATES, type ChildPort, type ChildRunState, type DomainEvent, type Result } from '../core/types.js';
+import { PiDriver, type PiDriverOptions } from '../pi/driver.js';
+import { TaskStore, type TaskStoreOptions, type TaskView } from '../store/task-store.js';
+
+/** The request of a front end. */
+export interface Delegation {
+  agent: string;
+  briefText: string;
+  files?: string[];
+  expectedOutput?: string;
+  parentSessionId?: string;
+}
+
+export class EmptyBriefError extends Error {
+  readonly code = 'empty_brief';
+  constructor() {
+    super('the brief is empty; write a self-contained brief for the child');
+    this.name = 'EmptyBriefError';
+  }
+}
+
+export interface DelegateOptions {
+  wait: boolean;
+  onEvent?: (event: DomainEvent) => void;
+  onState?: (state: ChildRunState) => void;
+  /** Aborting it cancels the task. */
+  signal?: AbortSignal;
+}
+
+export type DelegateReply = { kind: 'result'; result: Result } | { kind: 'started'; taskId: string };
+
+export type CollectReply =
+  | { kind: 'result'; result: Result }
+  | { kind: 'running'; taskId: string }
+  | { kind: 'abandoned'; taskId: string }
+  | { kind: 'other_process'; taskId: string }
+  | { kind: 'not_found'; taskId: string };
+
+export interface DelegationServiceOptions extends RootSources {
+  /** Replaces PiDriver, for tests. Receives the resolved project root. */
+  childPort?: (projectRoot: string, store: TaskStore) => ChildPort;
+  driver?: Omit<PiDriverOptions, 'projectRoot' | 'sessionsFolder'>;
+  store?: TaskStoreOptions;
+  warn?: (message: string) => void;
+}
+
+interface Connected {
+  projectRoot: string;
+  store: TaskStore;
+  core: TaskCore;
+  driver: PiDriver | null;
+}
+
+/** Render the files and the expected output after the brief text, into one brief. */
+export function renderBrief(delegation: Pick<Delegation, 'briefText' | 'files' | 'expectedOutput'>): string {
+  let brief = delegation.briefText;
+  const files = (delegation.files ?? []).filter((f) => f !== '');
+  if (files.length > 0) brief += `\n\n## Files\n\n${files.map((f) => `- ${f}`).join('\n')}`;
+  if (delegation.expectedOutput !== undefined && delegation.expectedOutput.trim() !== '') {
+    brief += `\n\n## Expected output\n\n${delegation.expectedOutput}`;
+  }
+  return brief;
+}
+
+/**
+ * Keeps a child run Pending while its endpoint has reached its parallel limit, and
+ * releases it first come first served. Counts only the Starting and Live runs of
+ * this process; nothing is locked or signalled across processes.
+ */
+export class EndpointLimiter {
+  private readonly active = new Map<string, number>();
+  private readonly queues = new Map<string, Task[]>();
+  private readonly limits = new Map<string, number | null>();
+
+  admit(task: Task, endpoint: string, limit: number | null): void {
+    this.limits.set(endpoint, limit);
+    const queue = this.queues.get(endpoint) ?? [];
+    this.queues.set(endpoint, queue);
+    queue.push(task);
+    // A cancelled Pending run leaves the queue and never starts.
+    const stop = task.onStateChange((state) => {
+      if (state === 'Cancelled' && queue.includes(task)) {
+        queue.splice(queue.indexOf(task), 1);
+        stop();
+      }
+    });
+    this.drain(endpoint);
+  }
+
+  activeCount(endpoint: string): number {
+    return this.active.get(endpoint) ?? 0;
+  }
+
+  private drain(endpoint: string): void {
+    const queue = this.queues.get(endpoint)!;
+    const limit = this.limits.get(endpoint) ?? null;
+    while (queue.length > 0 && (limit === null || this.activeCount(endpoint) < limit)) {
+      const task = queue.shift()!;
+      if (task.state !== 'Pending') continue;
+      this.active.set(endpoint, this.activeCount(endpoint) + 1);
+      let counted = true;
+      // Whatever way the run ends, it stops being counted at once.
+      const stop = task.onStateChange((state) => {
+        if (counted && ENDED_STATES.has(state)) {
+          counted = false;
+          stop();
+          this.active.set(endpoint, this.activeCount(endpoint) - 1);
+          this.drain(endpoint);
+        }
+      });
+      task.release();
+    }
+  }
+}
+
+export class DelegationService {
+  private connected: Connected | null = null;
+  private starting: Promise<Connected> | null = null;
+  private readonly registry = new Map<string, Task>();
+  private readonly limiter = new EndpointLimiter();
+  private readonly warn: (message: string) => void;
+
+  constructor(private readonly options: DelegationServiceOptions = {}) {
+    this.warn = options.warn ?? ((m) => process.stderr.write(`subzero: ${m}\n`));
+  }
+
+  get projectRoot(): string | undefined {
+    return this.connected?.projectRoot;
+  }
+
+  /** The task store, for front ends that read task records. Requires start(). */
+  get store(): TaskStore {
+    if (this.connected === null) throw new Error('the delegation service has not started');
+    return this.connected.store;
+  }
+
+  /**
+   * Resolve the project root and connect. Until a root resolves, every call tries
+   * again and throws the unresolved root error; once it resolves it never changes.
+   */
+  async start(): Promise<void> {
+    await this.connect();
+  }
+
+  private async connect(): Promise<Connected> {
+    if (this.connected !== null) return this.connected;
+    if (this.starting === null) {
+      this.starting = (async () => {
+        const root = await resolveProjectRoot(this.options);
+        if (root instanceof UnresolvedRootError) throw root;
+        const store = new TaskStore(root, { warn: this.warn, ...this.options.store });
+        store.sweep();
+        const driver = this.options.childPort
+          ? null
+          : new PiDriver({ ...this.options.driver, projectRoot: root, sessionsFolder: store.sessionsFolder });
+        const port = driver ?? this.options.childPort!(root, store);
+        const core = new TaskCore({ port, store, warn: this.warn });
+        this.connected = { projectRoot: root, store, core, driver };
+        return this.connected;
+      })();
+      this.starting.catch(() => (this.starting = null));
+    }
+    return this.starting;
+  }
+
+  /**
+   * Turn a named agent and a brief into a task. Throws the unresolved root error,
+   * EmptyBriefError, the load error or the unknown agent error with no task made.
+   */
+  async delegate(delegation: Delegation, options: DelegateOptions): Promise<DelegateReply> {
+    const { projectRoot, core } = await this.connect();
+    if (delegation.briefText.trim() === '') throw new EmptyBriefError();
+    const agent: AgentDefinition = getAgent(projectRoot, delegation.agent);
+
+    const task = core.start({
+      agent,
+      brief: renderBrief(delegation),
+      ...(delegation.parentSessionId !== undefined ? { parentSessionId: delegation.parentSessionId } : {}),
+    });
+    this.registry.set(task.taskId, task);
+    if (options.onEvent) task.onEvent(options.onEvent);
+    if (options.onState) task.onStateChange(options.onState);
+    if (options.signal) {
+      const { signal } = options;
+      const onAbort = () => void task.cancel();
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+      void task.result.finally(() => signal.removeEventListener('abort', onAbort));
+    }
+    this.limiter.admit(task, agent.endpoint, agent.parallel);
+    // Only a run the limiter kept back is reported as Pending.
+    if (task.state === 'Pending') options.onState?.('Pending');
+
+    if (!options.wait) return { kind: 'started', taskId: task.taskId };
+    return { kind: 'result', result: await task.result };
+  }
+
+  /** Collect by task id: the live registry first, then the task record. */
+  async collect(taskId: string): Promise<CollectReply> {
+    const { store } = await this.connect();
+    store.sweep();
+    const live = this.registry.get(taskId);
+    if (live !== undefined) {
+      const result = live.settledResult;
+      return result !== undefined ? { kind: 'result', result } : { kind: 'running', taskId };
+    }
+    return this.fromRecord(store, taskId);
+  }
+
+  /** Wait up to timeoutMs for a live task; otherwise answer as collect does. */
+  async waitFor(taskId: string, timeoutMs: number): Promise<CollectReply> {
+    const first = await this.collect(taskId);
+    const live = this.registry.get(taskId);
+    if (first.kind !== 'running' || live === undefined) return first;
+    let timer: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      live.result,
+      new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), Math.max(0, timeoutMs)))),
+    ]);
+    clearTimeout(timer);
+    return result === null ? first : { kind: 'result', result };
+  }
+
+  async cancel(taskId: string): Promise<CollectReply> {
+    const { store } = await this.connect();
+    store.sweep();
+    const live = this.registry.get(taskId);
+    if (live !== undefined) return { kind: 'result', result: await live.cancel() };
+    // A settled task returns its stored result unchanged; nothing is signalled.
+    return this.fromRecord(store, taskId);
+  }
+
+  async list(parentSessionId?: string): Promise<TaskView[]> {
+    const { store } = await this.connect();
+    store.sweep();
+    return store.list(parentSessionId);
+  }
+
+  private fromRecord(store: TaskStore, taskId: string): CollectReply {
+    const record = store.readTask(taskId);
+    if (record === null) return { kind: 'not_found', taskId };
+    if (record.result !== null) return { kind: 'result', result: record.result };
+    if (record.status === 'abandoned') return { kind: 'abandoned', taskId };
+    return { kind: 'other_process', taskId };
+  }
+
+  /**
+   * Cancel every live child run of this process and wait for each to end. Past
+   * the deadline, SIGKILL whatever is left, so no child run outlives the caller.
+   */
+  async shutdown(deadlineMs = 8000): Promise<void> {
+    const live = [...this.registry.values()].filter((task) => task.settledResult === undefined);
+    let timer: NodeJS.Timeout | undefined;
+    const ended = await Promise.race([
+      Promise.all(live.map((task) => task.cancel())).then(() => true),
+      new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), deadlineMs))),
+    ]);
+    clearTimeout(timer);
+    if (!ended) this.connected?.driver?.killAll();
+  }
+}

@@ -3,6 +3,14 @@
 Status: draft · 2026-10-30 · builds on [problem.md](problem.md); integration facts are in
 [feasibility.md](feasibility.md); open items are in [decisions.md](decisions.md).
 
+> **Update 2026-11-03.** The spike's Sigil contracts (`design/*.sigil`) refine this design, and where they
+> differ they win. Folded in below: a **Delegation service** in front of the core; no changed-file list in
+> the result (git is the record and the README warns the user); an `abandoned` task status and an owner
+> process in the index instead of `parent_gone`; an optional **parallel limit** per model endpoint in
+> `endpoints:` instead of a lock-file slot; one required `timeout` in seconds counted from spawn; load and
+> unknown-agent errors; the project root resolved once; and an owner-only store folder that ignores itself.
+> Decisions made while writing them are listed at the end of [decisions.md](decisions.md).
+
 ## 1. Ubiquitous language
 
 | Term | Meaning |
@@ -23,7 +31,12 @@ Status: draft · 2026-10-30 · builds on [problem.md](problem.md); integration f
 | **Probe** | A read-only fork of a task's session, used to answer a question about the work (`ask`) without touching the main session. |
 | **Workspace** | The filesystem view the child gets: working directory, extra dirs, and the **skill overlay** (a directory holding *only* the declared skills). The host's own home stays the user's real one: same login, same session storage. |
 | **Task record** | `.agents/subzero/tasks/<task-id>/`: the frozen agent, the **launch spec** (exact argv, cwd, host version), the id mapping to the child session and the parent session, runs, turns, results, report and event log. Enough to continue, respawn, fork, rerun, ask, inspect or attach later. |
-| **Result** | What goes back to the parent: status, a summary bounded by the result budget, optional structured output, changed files, usage and cost. |
+| **Launch spec** | A neutral record, defined by the core, of how a driver started a child: the command as an opaque list without the prompt, the working directory, environment variable **names** (never values), the host version, the skill folder paths and the thinking level. Each driver fills it in. |
+| **Result** | What goes back to the parent: status, a summary bounded by the result budget, optional structured output, usage and cost. It carries no changed-file list: the user reviews the tree with git. |
+| **Owner process** | The process that created a task and runs its child, recorded by pid and start time on the task's first index line. |
+| **Start-up sweep** | Marks a task `abandoned` when its latest index line says running and its owner process is gone or has another start time. It signals no process. |
+| **Parallel limit** | An optional cap, per model endpoint, on how many children one process runs at once. Waiting delegations stay `Pending`. |
+| **Delegation service** | The one entry every front end goes through. It resolves the project root, runs the start-up sweep, looks up the agent, holds the live task registry and connects the core to the child port and the task store. |
 | **Event log** | The full normalized event stream of a task across all its runs, stored on disk. It is never sent to the parent. |
 
 ## 2. Bounded contexts
@@ -37,6 +50,7 @@ flowchart LR
   end
   subgraph subzero
     PA[Parent Integration<br/>ACL: MCP server · pi extension · plugins]
+    DS[Delegation service<br/>entry · registry · start-up sweep · parallel limit]
     CO[Composition<br/>config · validation · resolution]
     SC[Skill Catalog<br/>sources · pinning · materialize]
     OR[Orchestration — core<br/>Task aggregate · policies · registry]
@@ -49,7 +63,7 @@ flowchart LR
     C3[pi --mode rpc]:::h
     C4[ACP agents]:::h
   end
-  CC & CX & PI --> PA --> OR
+  CC & CX & PI --> PA --> DS --> OR
   OR --> CO --> SC
   OR --> CR --> C1 & C2 & C3 & C4
   OR --> RL
@@ -60,7 +74,8 @@ flowchart LR
 |---|---|---|---|
 | **Composition** | Parse, merge and validate `.agents/subzero.yaml` and skill manifests; produce `ResolvedAgent` | AgentDefinition, Defaults, Profiles | Upstream of Orchestration (published language: `ResolvedAgent`) |
 | **Skill Catalog** | Resolve skill refs (local path, git, npm), pin content hashes, check portability, materialize into a host-specific layout | Skill, SkillSource, SkillLock | Upstream of Composition and Child Runtime |
-| **Orchestration (core)** | Task lifecycle, runs and turns, state machine, policies (timeouts, budgets, concurrency, depth), result shaping, reports, probes | **Task** (aggregate root), Run, Turn, Result, Report, Policy | Core domain |
+| **Delegation service** | The entry that makes the core ready to delegate: resolves the project root once, runs the start-up sweep, loads the agent file on each delegation, holds the live task registry and applies the parallel limit | DelegationService, live task registry | In front of Orchestration; every front end (MCP server, CLI) goes through it |
+| **Orchestration (core)** | Task lifecycle, runs and turns, state machine, policies (timeouts, budgets, depth), result shaping, reports, probes | **Task** (aggregate root), Run, Turn, Result, Report, Policy | Core domain |
 | **Parent Integration** | Turn host tool calls and skills into domain commands and back. One adapter per parent host. | Tool schemas, proxy skills, progress mapping | Anti-corruption layer (ACL) in front of the core |
 | **Child Runtime** | Provision an isolated child for a host and drive it. Normalize host events into domain events. | Provisioner, Driver, HostCapabilities | ACL behind the core; one adapter per child host |
 | **Task store** | Persist task records, the id index, event logs, results and reports | TaskRecord, TaskIndex | Supporting |
@@ -110,13 +125,16 @@ Task                      the aggregate root: the id the parent holds
   runs:  Run[]            one per child process
   turns: Turn[]           one per input
   report: Report          rebuilt after every turn
-  status: TaskStatus      running | idle | needs_input | failed | cancelled | archived
+  owner: OwnerProcess     { pid, startTime }: the process that created the task and runs its child
+  status: TaskStatus      running | idle | needs_input | failed | cancelled | abandoned | archived
+                          running covers Pending, Starting and Live; abandoned is set only by the start-up sweep
 
 Run   { runId, pid, overrides{model?,thinking?}, startedAt, endedAt?,
-        exit?: settled | crashed | killed | timed_out | parent_gone }
+        exit?: settled | crashed | killed | timed_out }
 Turn  { turnId (1,2,3…), kind: brief | followup | answer, input, by: parent | user,
         runId, entries: {firstId, leafId}, result: Result, usage }
-LaunchSpec { argv (without the prompt), cwd, envNames, hostVersion, skillPaths }
+LaunchSpec { command (opaque list, without the prompt), cwd, envNames (names only), hostVersion, skillPaths, thinkingLevel? }
+                          neutral: defined by the core, filled in by each driver
 ```
 
 `entries` are the child session's own entry ids (pi entries have stable ids). They let subzero fork
@@ -125,6 +143,8 @@ LaunchSpec { argv (without the prompt), cwd, envNames, hostVersion, skillPaths }
 Invariants:
 - **One task ↔ one child session, for life.** Anything that needs a *new* session is a *new task* with
   `lineage` (fork, rerun, probe). This 1:1 mapping keeps "continue task X" unambiguous.
+- **A task whose owner process is gone is `abandoned`.** It has no result. It can still be listed,
+  attached and shown, and a result already stored in its record outranks a later `abandoned` line.
 - **At most one live run per task**, enforced by a task lock. A `continue` that arrives while a turn is
   running is queued as the host's follow-up (pi `follow_up`), or rejected with `busy` if the parent asked
   for that.
@@ -152,13 +172,16 @@ stateDiagram-v2
   Running --> NeedsInput: child asked a question / needs permission
   Running --> Failed: turn failed (error, crash, timeout, skill mismatch)
   Running --> Cancelled: cancel()
+  Running --> Abandoned: start-up sweep (owner process gone)
   NeedsInput --> Running: continue(answer)
   Idle --> Running: continue(message) — respawn if no live run
   Failed --> Running: continue(message) — retry in the same session
   Cancelled --> Running: continue(message)
+  Abandoned --> Running: continue(message) (v0.1)
   Idle --> Archived: retention / prune
   Failed --> Archived
   Cancelled --> Archived
+  Abandoned --> Archived
   NeedsInput --> Archived
   Archived --> [*]
 ```
@@ -167,7 +190,7 @@ Failed and Cancelled are **not** final. The session still exists, so the parent 
 it ("you hit a timeout; carry on from where you stopped").
 
 Run (one process):
-`Pending` (waiting for a concurrency slot) → `Starting` (spawn, verify skills) → `Live` → `Exited(reason)`.
+`Pending` (held back while its model endpoint's parallel limit is reached) → `Starting` (spawn, verify skills) → `Live` → `Exited(reason)`.
 With `process: exit` (the default), the run exits once its turn settles. With `process: keep`, it stays
 `Live` until the TTL runs out, so quick follow-ups skip the cold start. Either way the task becomes `Idle`.
 
@@ -200,12 +223,17 @@ Each driver maps its host's stream onto these events:
   no `off` on 5.5 models, so `off` is clamped to `low`. Codex values depend on the model.
 - **SkillRef**: `name` plus the source it resolves to, pinned in `subzero.lock` (path, git rev, sha256).
 - **Brief**: `{ task, context?, files?[], expectedOutput?, outputSchema? }`.
-- **Result** (one per turn): `{ task, turn, status, summary, structured?, changedFiles[],
-  questions?[], usage{tokens,usd,duration}, next: [continue, ask, fork] }`. `status` is
-  `completed | truncated | needs_input | failed | cancelled`. `needs_input` carries
+- **Result** (one per turn): `{ task, turn, status, summary, structured?,
+  questions?[], usage{tokens,usd,duration}, next: [continue, ask, fork] }`. There is no changed-file list.
+  `status` is `completed | truncated | needs_input | failed | cancelled`. `truncated` means only that
+  the child stopped at its own length limit. `cancelled` is a status and carries no failure kind. A
+  usage field the driver cannot report is marked unavailable and is never zero. `needs_input` carries
   `input.kind: question | permission`, matching `InputRequested`. `failed` carries a `reason`:
   `skill_mismatch | timeout | crashed | error`. The task id always comes
-  first, so it survives in the parent's history and after compaction.
+  first, so it survives in the parent's history and after compaction. A summary over the result budget
+  is cut at a line boundary, an open code fence is closed, and a visible marker names the omitted amount
+  and says that `subzero show` has the full text. The cut does not change the status, and an empty
+  summary stays empty.
 
 ### 3.5 Knowing what the child did, without its context
 
@@ -214,8 +242,8 @@ session.
 
 | Level | What the parent gets | Size | How it's produced |
 |---|---|---|---|
-| **Result** | Final answer, status, changed files, task id | ≤ result budget (2k by default) | Automatically, every turn |
-| **Report** | Turns with their inputs, files read and changed (diff stats), commands with exit codes, skills used, errors, usage | ≤ ~1k, or one turn | `tasks(task, detail: report)`. A projection of the event log, **no LLM call** |
+| **Result** | Final answer, status, task id | ≤ result budget (2k by default) | Automatically, every turn |
+| **Report** | Turns with their inputs, files read and written (from the child's own tool activity, not from git), commands with exit codes, skills used, errors, usage | ≤ ~1k, or one turn | `tasks(task, detail: report)`. A projection of the event log, **no LLM call** |
 | **Ask** | An answer to any question about the work ("why did you choose X?", "which tests did you run?", "show the function you changed") | ≤ result budget | `ask(task, question)`: a **probe** (below) |
 | **Transcript** | Everything | never sent to the parent | For humans: `subzero show`, `subzero attach` |
 
@@ -232,13 +260,17 @@ for audit.
 
 ```
 .agents/subzero/
-  index.jsonl                 # one line per task (append-only, latest line wins):
-                              #   task, agent, status, parentHost, parentSessionId, toolUseId,
-                              #   childHost, childSessionId, sessionFile, lineage, createdAt, updatedAt
+  .gitignore                  # created with the folder; ignores everything in it (`*`). An existing one is left
+                              # alone and the user's own .gitignore is never edited. The folder is owner-only (0700).
+  index.jsonl                 # one line per status update (append-only, latest line wins):
+                              #   task, agent, status, parentHost, parentSessionId (optional), toolUseId,
+                              #   childHost, childSessionId, sessionFile, lineage, createdAt, updatedAt;
+                              #   the first line of a task also records its owner process (pid, start time)
   tasks/<task-id>/
     task.json                 # aggregate snapshot: agent (frozen), launch spec, runs, turns, status
     events.jsonl              # domain events across all runs
-    turns/<n>.json            # input + the exact Result the parent received
+    turns/<n>.json            # input + the exact Result the parent received. Written in one step, and before
+                              # the index line that gives its status, so a stored result outranks the index
     report.md                 # current report (§3.5)
   sessions/                   # pi child session files, named after the task id
 ```
@@ -250,6 +282,9 @@ Lookups the index supports:
   and `/clear`, because the parent adapter records the parent session id; on Claude, through the
   SessionStart hook.
 - **task → lineage**: forks, reruns and probes of a task.
+
+The start-up sweep reads the index at every start-up of a front end and again before a collect, a cancel
+and a listing. A listing from the `tasks` tool holds at most 50 tasks, running ones first.
 
 
 
@@ -266,7 +301,9 @@ defaults:
   reasoning: medium
   workspace: shared          # shared | worktree  (where the child works)
   permissions: read-only     # read-only | workspace-write | full  (what it may do there; D8)
-  timeout: { idle: 5m, wall: 30m }
+  timeout: 1800              # example value. Spike: required, in seconds, wall-clock from spawn to settlement,
+                             # including skill verification; time spent Pending does not count.
+                             # An idle limit (`idle:`) is v0.1.
   result: { max_tokens: 2000 }
   process: exit              # exit (kill when the task ends) | keep (stay alive for follow-ups, ttl)
   record: keep               # keep (host session + run record kept) | none (nothing written)
@@ -276,11 +313,18 @@ skills:                      # paths are relative to this file; bare names fall 
   skill-a: ./subzero/skills/skill-a
   skill-b: git+https://github.com/acme/skills#path=skill-b&ref=v1.4.0
 
-models:                      # optional named endpoints, referenced as <name>/<model>
+endpoints:                   # named model endpoints, defined once and reused. An agent belongs to the endpoint
+                             # named by the part of its `model` before the first slash (`local/qwen3-coder-30b`)
   local:
-    base_url: http://localhost:8000/v1
-    api: openai-completions  # what the child host must speak
-    api_key: ${LOCAL_API_KEY}
+    base_url: http://localhost:8000/v1   # v0.1; in the spike pi's own models.json holds the server
+    api: openai-completions              # v0.1: what the child host must speak
+    api_key: ${LOCAL_API_KEY}            # v0.1
+    parallel: 1              # cap on children this process runs at once on this endpoint, shared by every agent
+                             # on it. Spike: an entry must hold a positive whole number, and an endpoint with no
+                             # entry has no cap. v0.1: optional once an entry has other fields. An entry that no
+                             # agent belongs to is a load error
+
+models:
   tiers:                     # what skill manifests' `tier:<name>` hints resolve to, per host
     medium: { pi: local/qwen3-coder-30b, claude: anthropic/claude-sonnet-5-5 }
     large:  { claude: anthropic/claude-opus-5-5 }
@@ -381,6 +425,21 @@ directly. That skips subzero and brings back the context pollution. So:
 
 ### 4.2 Rules
 
+- **Load and lookup.** The agent file is read again on each delegation. A missing, unreadable or malformed
+  file, or any invalid agent or endpoint entry, is a **load error** that fails the whole load and makes no
+  task. An unknown agent name returns an error that names every configured agent, also with no task made.
+- **Endpoints.** An endpoint is defined once under `endpoints:` and reused by every agent whose `model` starts
+  with its name, so they share its `parallel` limit. In the spike an entry holds only `parallel`; its
+  `base_url`, `api` and `api_key` join it in v0.1, replacing the former `models:` endpoint entries.
+- **Parallel limit.** The Delegation service counts only the children of its own process that are
+  `Starting` or `Live`. Past the limit a delegation stays `Pending` and is released first come first served
+  when one ends, whether it settles, fails or is cancelled. A second process or window is not counted, and
+  nothing is locked or signalled across processes.
+- **Project root.** Resolved once per process: `SUBZERO_PROJECT_DIR` (empty counts as unset), then the
+  first root the parent reports, then the CLI's working directory; never the server's own. It is absolute
+  with symbolic links resolved. When none resolves, every call returns an error that names
+  `SUBZERO_PROJECT_DIR` until one does.
+
 - `subzero validate` checks the schema, merges all sources, resolves skills, checks that each model is
   compatible with its host, lints skills for portability, and writes `subzero.lock`.
 - **A repo's `.agents/subzero.yaml` is executable configuration.** It starts processes with permissions.
@@ -398,7 +457,7 @@ Six tools. Every one returns only bounded results; none returns a transcript. On
 | `delegate` | `agent`, `brief`, `files?`, `expected_output?`, `from?: {task, mode: fork \| rerun, at_turn?}`, `wait?` | `Result` with a **new task id** | New task + new session. Fork branches from `from.task`'s session (at a turn); rerun starts fresh with the same brief. |
 | `continue` | `task`, `message`, `overrides?: {model, thinking}`, `wait?` | `Result` of the new turn | **Same task, same session.** Respawns the child if its process has exited. |
 | `ask` | `task`, `question` | Bounded answer | Probe task (read-only fork); the main session is untouched |
-| `tasks` | `task?`, `scope?: conversation \| all`, `detail?: list \| report \| turn:<n>` | Task list (id, agent, status, one-line summary) or one task's report | None |
+| `tasks` | `task?`, `scope?: conversation \| all`, `detail?: list \| report \| turn:<n>` | Task list (id, agent, status, creation time; at most 50, running first, with a notice of how many were left out) or one task's report | None |
 | `await` | `tasks[]`, `timeout_s` | `Result[]` for finished turns | None |
 | `cancel` | `task` | Final status | Aborts the running turn; the task stays continuable |
 
@@ -406,7 +465,10 @@ The agent catalog comes from the proxy skills (§5.2) and the server instruction
 descriptions. **The server instructions must tell the parent to write a self-contained brief.**
 
 `wait` mode sends progress notifications on every domain event, which keeps Claude Code's MCP idle
-timeout from firing. If the parent cannot hold a long call open (Codex `tool_timeout_sec` defaults to
+timeout from firing. Progress is one line from the latest event (agent, kind of event, tool and target
+path, elapsed time; "waiting" while `Pending`), at most once a second, with a heartbeat after 30 s of
+silence, and never agent text, tool output or stderr. A `cancel` of a task that another process owns says
+so and changes nothing. If the parent cannot hold a long call open (Codex `tool_timeout_sec` defaults to
 60s), the adapter returns the task id early and the parent calls `await`.
 
 ### 5.2 Three triggers: explicit, proxy skill, and sub-agent routing
@@ -509,7 +571,7 @@ sequenceDiagram
   participant H as Child host process
   P->>A: delegate(agent, brief, wait)
   A->>C: delegate(...)
-  C->>C: resolve agent (lock), check depth/concurrency
+  C->>C: delegation service: load agent file, look up agent, hold Pending while the parallel limit is reached
   C->>R: prepare(resolvedAgent, workspace)
   R->>R: create task record + launch spec, index task ↔ session
   R->>H: spawn (isolated flags)
@@ -523,7 +585,7 @@ sequenceDiagram
     A-->>P: progress notification
   end
   H-->>R: turn done (usage, final text)
-  C->>C: shape Result (budget, changed files via git diff)
+  C->>C: shape Result (budget cut with a marker, no changed-file list)
   C->>R: run exits → kill process group, keep session + task record
   C-->>A: Result (task id first)
   A-->>P: bounded result
@@ -536,7 +598,8 @@ v1 is a **library plus a per-parent-session process**. The MCP server (or the pi
 core instance for that parent session. State lives in memory and is mirrored to the task store
 (§3.6), so tasks outlive the parent session. A task started in yesterday's conversation can be continued
 or asked about today, and the `subzero` CLI works on the same store. Two cores (two Claude windows) share
-the store, so the task lock must be a file lock. A shared daemon (one core for many parents,
+the store, so the task lock must be a file lock; the parallel limit, in contrast, counts only one process's
+children. A shared daemon (one core for many parents,
 plus a dashboard) is left for later. See D3.
 
 Implementation language: **TypeScript**. The pi extension API, the ACP SDK (1.0), the Claude Agent SDK,

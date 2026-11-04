@@ -1,0 +1,9 @@
+{
+  "nodeModulesDir": "none",
+  "tasks": {
+    "test": "deno test --allow-read --allow-write --allow-run --allow-env",
+    "run": "deno run --allow-read --allow-write --allow-run --allow-env main.ts",
+    "check": "deno check *.ts"
+  },
+  "fmt": { "lineWidth": 100 }
+}

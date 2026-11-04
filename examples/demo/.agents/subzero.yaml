@@ -1,0 +1,18 @@
+# subzero agents for the demo. Skill folders resolve against this file's directory.
+skills:
+  code-review: ../pi-skills/code-review
+
+endpoints:
+  # One local GPU serves one request at a time.
+  r9700:
+    parallel: 1
+
+agents:
+  reviewer:
+    description: Reviews one source file for bugs and writes the findings to the review file the brief names.
+    host: pi
+    model: r9700/Qwen3.8
+    thinking: low
+    skills: [code-review]
+    tools: [read, grep, find, ls, write]
+    timeout: 600

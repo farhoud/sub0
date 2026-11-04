@@ -14,15 +14,15 @@ make each choice explicitly.
 | D5 | Child transport | native CLI / ACP / both | **Both, behind one ChildPort.** Native drivers first (pi → codex → claude), generic ACP driver next | ACP has no skills concept, so provisioning is per host either way. ACP gives the long tail cheaply. See [feasibility.md](feasibility.md#what-this-means-for-the-acp-or-cli-question). |
 | D6 | How skills reach the child | (a) host-native discovery from an isolated dir; (b) inline the skill bodies into the system prompt; (c) both | **(a)**; add (b) only where the host can't load skills from an overlay dir without losing the user's login (Claude: `--disable-slash-commands` turns off all skills, so the declared ones are inlined and `--add-dir` keeps their files readable; design §6.1) | (a) keeps `scripts/` and `references/` with their relative paths working. A single-purpose child can safely be told "you have skills X, Y; use them". |
 | D7 | Process vs session lifetime | throw everything away / keep the process alive / **end the process, keep the session** | `process: exit` + `record: keep` by default; `process: keep` (ttl) for chatty follow-ups; `record: none` for sensitive work | The *context* is what must be cleaned, and it dies with the process. The *session record* is what makes runs inspectable, rerunnable and resumable (design §6.3). |
-| D8 | Workspace and write policy | two settings: `workspace` (where: shared cwd / git worktree) and `permissions` (what: read-only / workspace-write / full) | **`workspace: shared` + `permissions: read-only` by default**; `workspace-write` on the shared cwd as an opt-in; `workspace: worktree` for parallel writers. subzero enforces nothing beyond the host's own sandbox or tool list. No snapshots or copies of workspace files: git is the record, `changed_files` comes from git, and the user reverts with git | Two agents writing the same tree at the same time is the most common way this goes wrong (P6). |
+| D8 | Workspace and write policy | two settings: `workspace` (where: shared cwd / git worktree) and `permissions` (what: read-only / workspace-write / full) | **`workspace: shared` + `permissions: read-only` by default**; `workspace-write` on the shared cwd as an opt-in; `workspace: worktree` for parallel writers. subzero enforces nothing beyond the host's own sandbox or tool list. No snapshots or copies of workspace files: git is the record, subzero records no changed files, and the user reviews and reverts with git (the README warns) | Two agents writing the same tree at the same time is the most common way this goes wrong (P6). |
 | D9 | Permissions in a headless child | (a) static policy only; (b) forward to parent / user; (c) auto-approve | **(a)** in v1: the YAML `permissions` maps to the host sandbox. Anything outside it gives `InputRequested` → result `needs_input` (kind `permission`) | Parents can't reliably show a dialog from inside a tool call (Claude elicitation works only in interactive sessions; Codex has none). pi and ACP can do (b) later. |
-| D10 | Model reference format | free string / `provider/model` + named endpoints | `provider/model` + `models:` block; validate host × provider when the config is resolved | `qwen-23` alone is ambiguous: which server, which API format? Codex needs the Responses API and Claude needs the Anthropic API. |
+| D10 | Model reference format | free string / `provider/model` + named endpoints | `provider/model` + an `endpoints:` block (named endpoints defined once and reused, each holding its `parallel` limit and, in v0.1, its `base_url`, `api` and `api_key`); validate host × provider when the config is resolved | `qwen-23` alone is ambiguous: which server, which API format? Codex needs the Responses API and Claude needs the Anthropic API. |
 | D11 | Reasoning scale | per-host values / one normalized enum | Normalized enum `off…max`, mapped per host, with the value actually applied reported back | Users write it once; any loss in the mapping is visible instead of silent. |
 | D12 | Compile to native when possible? | always spawn / compile (e.g. Claude parent + Claude child → a `context: fork` skill) | Not in v1, with one exception: `host: native` agents (a parent-host subagent that reaches its `delegates:` through subzero) are hand-written in the spike and generated in v0.1 | It is cheaper and faster when it applies, but it is a second code path. Keep it in mind so subzero doesn't fight native features. The sigil spike shows the two combine: a native Claude subagent keeps the main conversation clean, and subzero gives it the sub-agents Claude can't nest. |
 | D13 | Skill sources | local only / + git / + npm / + registry | Local + git (pinned in `subzero.lock`) | It matches compose's `build:` and image usage. A registry is out of scope. |
-| D14 | Recursion | allow children to use subzero / forbid | Allow, but only to the agents listed in the child's `delegates:`, with `maxDepth: 2` passed down via env (`SUBZERO_DEPTH`). Nested children share the parent's concurrency limits; a waiting run lends its slot to its child. | Real skills need it once they are delegated whole: sigil-evaluate on pi would start its own interpreter children, and sigil-write starts a fresh evaluator. The spike avoids it by running sigil-evaluate as a native Claude subagent (target-claude-pi.md §6.1); it lands in v0.1. The allow-list and depth limit stop fork bombs and cycles; slot lending stops a depth-2 deadlock on a single local GPU. |
+| D14 | Recursion | allow children to use subzero / forbid | Allow, but only to the agents listed in the child's `delegates:`, with `maxDepth: 2` passed down via env (`SUBZERO_DEPTH`). Nested children share the parent's parallel limit; a waiting run lends its place under that limit to its child. | Real skills need it once they are delegated whole: sigil-evaluate on pi would start its own interpreter children, and sigil-write starts a fresh evaluator. The spike avoids it by running sigil-evaluate as a native Claude subagent (target-claude-pi.md §6.1); it lands in v0.1. The allow-list and depth limit stop fork bombs and cycles; lending a place under the parallel limit stops a depth-2 deadlock on a single local GPU. |
 | D15 | Trigger mechanism | explicit tool / proxy skill / host interception hooks | Explicit tool + **proxy skills** (work on all hosts); hooks are optional extras | Interception depends on undocumented schemas (Claude `Skill` tool input). A proxy `SKILL.md` is portable and cheap. |
-| D16 | Result contract | free text / text + structured / full transcript | Bounded summary (default 2k tokens) + optional JSON (via `--json-schema`, `--output-schema`, or validated by the core for pi) + changed-file list + `runId` | The transcript stays in the run log. Returning it would recreate the problem. |
+| D16 | Result contract | free text / text + structured / full transcript | Bounded summary (default 2k tokens) + optional JSON (via `--json-schema`, `--output-schema`, or validated by the core for pi) + `runId`. No changed-file list: the user reviews the tree with git | The transcript stays in the run log. Returning it would recreate the problem. |
 | D17 | Where agent definitions come from | workspace `.agents/subzero.yaml` only / skill manifest only / **both, layered** | **Both.** A skill ships a recommended `agents/subzero.yaml`; the workspace and user config override it or turn it off. Skill manifests use model tiers, can't grant permissions and can't add skill sources. | Skill authors know how their skill should run, and the workspace owns endpoints, permissions and trust. This is the same split as a Dockerfile (author) and a compose file (operator). See design §4.1. |
 | D18 | Isolation boundary | (a) throwaway config home per run; (b) **real home + launch flags + skill overlay**; (c) persistent per-agent home | **(b)**; (c) only as a fallback for a host whose flags can't isolate skills; never (a) | (b) keeps the user's login (no API keys needed), keeps sessions where the host's own resume/fork tools find them, and never copies credentials. pi can do (b) today (tested); claude has the flags but CLAUDE.md loading is unverified; codex needs a spike for *adding* overlay skills. |
 | D19 | Identity the parent holds | run id (one process) / child session id / **task id 1:1 with a child session** | **Task id** (`sz-xxxxxx`), also used as the child's session id where the host accepts one (pi); claude (UUID only) and codex (assigns its own) are mapped in the task index. Runs (processes) and turns sit under it. A new session always means a new task with lineage. | The parent needs one handle that survives the child exiting, respawning, compaction and `/clear`. A 1:1 task–session mapping keeps "continue X" unambiguous. Fork and rerun stay traceable. |
@@ -42,9 +42,10 @@ make each choice explicitly.
   fields, and letting the child return `questions` instead of guessing.
 - **P4. The result pollutes the parent anyway.** Unbounded results defeat the purpose. The core
   enforces the budget, not the child.
-- **P5. Trusting the child's result.** The parent can't see the child's work. Return the changed files
-  (from `git diff`) and the task id, so the parent can `ask` about the work or read its report, and the
-  user can `subzero show` or `attach` it.
+- **P5. Trusting the child's result.** The parent can't see the child's work. Return the task id, so the
+  parent can `ask` about the work or read its report, and the user can `subzero show` or `attach` it.
+  subzero does not return a changed-file list: git is the record, and the README warns the user to review
+  the tree with git (decision made while writing the spike contracts, below).
 
 ### Technical
 - **P6. Concurrent writes.** Parent and child, or two children, editing the same files at once. Use the
@@ -85,7 +86,9 @@ make each choice explicitly.
 - **P15. Process hygiene.**
   - Kill the child's whole process group on cancel or timeout. Children start MCP servers and shells.
   - Clean up skill overlays on crash, using a start-up sweep of stale `.agents/subzero/tasks/*/skills`.
-  - Limit concurrency per host and per model endpoint. A single local GPU serializes requests anyway.
+  - Cap parallel children per model endpoint with an optional `parallel` limit in `endpoints:`. It counts
+    only one process's children, so a terminal run or a second window is not counted. A single local GPU
+    serializes requests anyway.
 
 - **P19. The parent bypasses subzero.** A skill managed by subzero that also sits in the parent's
   own skill directories gets loaded directly into the parent context. Keep managed skills outside host
@@ -141,3 +144,44 @@ make each choice explicitly.
    pi parent extension, Codex parent plugin.
 4. **v0.3:** generic ACP driver, worktree mode, structured outputs everywhere, plus D12 (compile to
    native) if it is worth it.
+
+## Decisions made while writing the spike's Sigil contracts (2026-11)
+
+These were decided one at a time with the user while the contracts in `design/*.sigil` were written. They
+apply to the spike; the contracts win where they differ from the rest of these documents.
+
+1. The plugin's allow rule stays a stated assumption: the README and each delegating experiment arm's
+   allow-list supply it. A setup command is left to a later version.
+2. The driver hands the launch spec to its caller in the run-started event; the core writes it into the
+   task record. Attach on a task with no recorded launch spec is refused. The skill overlay is kept as
+   long as the record. The launch spec is a neutral shape defined by the core.
+3. A swept task gets its own status `abandoned`; `parent_gone` is not a failure kind. The owner process
+   (pid and start time) is recorded on the task's first index line, and the sweep never signals a process.
+   It runs at every start-up and again before a collect, a cancel and a listing. A stored result
+   outranks a later `abandoned` line, and the result is written in one step before its index line.
+4. A new component, the **Delegation service**, owns the delegation, the live task registry, the start-up
+   sequence, the agent lookup and the connection of the parts. The core takes an agent definition, not a
+   name, and does not depend on a child driver. The agent file is read on each delegation. An unknown
+   agent or a load error makes no task.
+5. The project root is resolved once per process and handed to every part. It is absolute with symbolic
+   links resolved; an empty `SUBZERO_PROJECT_DIR` counts as unset; the first reported root wins; with no
+   root every call returns an error that names `SUBZERO_PROJECT_DIR`.
+6. Files and expected output are rendered after the brief text, only when present. An empty brief text is
+   refused. Progress is one line from the latest event, at most once a second, with a 30 s heartbeat.
+7. No git status recording and no changed-file list. The user is warned in the README and reviews the tree
+   with git.
+8. `cancelled` is a status only; failure kinds are timeout, crashed, error and skill_mismatch. A budget cut
+   does not set `truncated`, which means only the stop reason `length`.
+9. The store folder `.agents/subzero/` is owner-only and holds its own `.gitignore` containing `*`; the
+   user's own `.gitignore` is never edited.
+10. `timeout` is required, in seconds, from spawn to settlement, and does not count time spent `Pending`.
+11. Endpoint slots with lock files were removed: other agents or hosts may use the same server, and
+    nothing outside one process can be controlled. Instead an optional `parallel` limit per model endpoint
+    (`endpoints:`) is counted from one process's own `Starting` or `Live` children; further delegations
+    stay `Pending`, first come first served. An endpoint entry that no agent uses is a load error.
+12. A task listing shows task id, agent, status and creation time, at most 50 tasks, running first.
+13. A collect or cancel of a running task owned by another process says so and changes nothing.
+14. The experiment has five arms; B-low runs the interpreter at thinking `low` with its own agent
+    definition. The measurement row records context use at settle (not a peak), the declared thinking
+    level and any interpreter write outside its answer file.
+

@@ -1,0 +1,74 @@
+@design/delegation-service.sigil from DelegationService import { delegation }
+@design/task-core.sigil from TaskCore import {
+  task, task id, child run, result, transcript, launch spec,
+}
+@design/agent-config.sigil from AgentConfig import {
+  project root, unknown agent error, load error,
+}
+@design/pi-driver.sigil from PiDriver import {
+  attach command, child session,
+}
+@design/task-store.sigil from TaskStore import {
+  task record, task status, parent session id,
+}
+
+component Cli {
+  goal {
+    Give a person at a terminal the same delegation as the MCP server, plus a way
+    to open and export what a child did after the parent session is gone.
+  }
+
+  logic {
+    Every command starts through the delegation service, so that the
+    start-up sweep runs first. On subzero run, make a delegation from the agent
+    name and the brief in the arguments, with no parent session id, wait for it
+    and print the result. When the agent name is unknown, print the
+    unknown agent error to stderr and exit non-zero with no task made. When the
+    agent file fails to load, print the load error to stderr and exit non-zero
+    the same way. On subzero tasks, read the task records and print the id,
+    agent, task status and creation time of every task. On subzero attach, read
+    the launch spec of the task, refuse when the task has no recorded
+    launch spec or its child run is live, and otherwise start the
+    attach command. On subzero show, export the child session of the task as
+    HTML with pi --export, and say that an abandoned task has no result. Each
+    command ends by printing its output and exiting.
+  }
+
+  constraints {
+    The Cli passes its working directory to the delegation service as its
+    fallback project root, and the project root comes from AgentConfig in the
+    order its constraints give.
+
+    A delegation from the Cli must carry no parent session id, because a command
+    line has no conversation.
+
+    The attach command must be refused while the task status of the task is
+    running, because the start-up sweep has already marked the task of a dead
+    owner abandoned. It must also be refused with a message that no launch spec
+    was recorded when the task record has none.
+
+    Cli depends on DelegationService for the delegation, on TaskStore for the
+    task record, on TaskCore for the launch spec and on PiDriver for the
+    attach command.
+  }
+
+  cases {
+    Attach on a task whose task status is running is refused. On a settled task
+    it builds the attach command from the launch spec, and on a task with no
+    recorded launch spec it is refused.
+
+    Subzero run against a scripted pi writes the task record with task.json,
+    events.jsonl and turns/1.json, appends an index line and prints the result.
+
+    Subzero run with an unknown agent name prints the unknown agent error and exits
+    non-zero without making a task.
+  }
+
+  interface {
+    Offer four commands: subzero run with an agent and a brief, subzero tasks,
+    subzero attach with a task id, and subzero show with a task id.
+
+    Make the child session of a task, its transcript and its task record reachable
+    by task id after the parent session has ended.
+  }
+}

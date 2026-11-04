@@ -1,0 +1,162 @@
+@design/task-core.sigil from TaskCore import {
+  task, task id, brief, child run, result, domain event, child port,
+}
+@design/agent-config.sigil from AgentConfig import {
+  agent definition, project root, unknown agent error, load error,
+  unresolved root error, model endpoint, parallel limit,
+}
+@design/task-store.sigil from TaskStore import {
+  task record, task status, parent session id, start-up sweep,
+}
+
+component DelegationService {
+  goal {
+    Give every front end one entry that is ready to delegate: it turns a named
+    agent and a brief into a task, finds a live task by its task id later, and
+    starts clean after an earlier process has died.
+  }
+
+  state {
+    A *delegation* is the request of a front end. It holds an agent name, a
+    *brief text*, optional files, an optional expected output and an optional
+    parent session id.
+
+    The *live task registry* holds the tasks that this process has started, by
+    their task id.
+  }
+
+  logic {
+    On start-up, resolve the project root through AgentConfig from the roots or
+    the fallback working directory that the front end gives. When no
+    project root resolves, the start-up waits, and each later call resolves it
+    again and returns the unresolved root error to its caller, with no task
+    made, until one resolves. Once a project root resolves, keep it for the
+    process, run the start-up sweep with it, and connect TaskCore to the
+    child port and the task record, each from the component that provides it
+    and each given that project root. The start-up ends when the sweep has
+    finished and TaskCore is connected.
+
+    On a delegation, load the agent definitions again and look up the agent
+    name. When the load fails, return the load error to the caller and end the
+    flow with no task made. When the name is unknown, return the
+    unknown agent error to the caller and end the flow with no task made.
+    Otherwise render the files and the expected output after the brief text
+    into one brief, start the task in TaskCore with its agent definition, that
+    brief and the parent session id, and add the task to the
+    live task registry, which a later collect or cancel reads. When the child
+    runs of its model endpoint in this process that are Starting or Live have
+    reached its parallel limit, keep the child run Pending and release it,
+    first come first served, when one of them ends, and otherwise release it at
+    once. When the caller waits, offer each domain event to the caller and
+    return the result when the child run settles, which ends the flow. When the
+    caller does not wait, return the task id at once, which ends the flow.
+
+    Before a collect, a cancel or a listing, run the start-up sweep again, so
+    that a task whose owner process died after start-up is not shown as
+    running. On a collect or a cancel by task id, look in the
+    live task registry and then in the task record, which gives the stored
+    result of a settled task or the task status of an abandoned one. A task
+    with a stored result gives that result, and a task whose task status is
+    abandoned gives no result and says that it is abandoned, which ends the
+    flow. A cancel of a task that has already settled returns its stored result
+    unchanged, which ends the flow. A collect or a cancel of a task whose
+    task status is running and that is not in the live task registry reports
+    that the task runs in another process and cannot be cancelled here, and
+    changes nothing, which ends the flow.
+  }
+
+  constraints {
+    DelegationService must create no task or task record when the agent name is
+    unknown or the agent definitions fail to load, and it must load the agent
+    definitions again on each delegation.
+
+    The brief that the service renders must start with the brief text unchanged,
+    followed by a Files section and an Expected output section only when they are
+    present. A delegation with an empty brief text must be refused whatever its
+    files hold, and the paths of its files are not checked.
+
+    Every start-up of a front end, whether the server or a command, must go through
+    the start-up of the service, so that the start-up sweep runs at every start-up.
+
+    The project root must be resolved once for each process, and the
+    agent file, the task record and the child run must all use that same
+    project root, which must not change once it is resolved. No other component
+    may call for a project root for its own use, and each receives it from
+    DelegationService. A call made before the project root is resolved must
+    return the unresolved root error and must create no task, task record or
+    index line.
+
+    The live task registry must hold no state beyond this process, and the
+    task record stays the only durable state of a task.
+
+    A parallel limit must be counted from the child runs of this process that
+    are Starting or Live, and a child run that is Pending must not be counted.
+    A child run that ends in any way, whether Settled, Failed or Cancelled,
+    must stop being counted at once and release the next Pending child run. A
+    delegation from a command line process or from another session is not
+    counted, and nothing may signal or lock across processes to enforce it.
+
+    DelegationService depends on TaskCore for the task, on PiDriver for the
+    child port, on AgentConfig for the agent definition and the project root,
+    and on TaskStore for the task record, the task status and the
+    start-up sweep.
+  }
+
+  cases {
+    A delegation with an unknown agent name returns the unknown agent error and
+    writes no task record.
+
+    A call made before any project root is known returns the
+    unresolved root error and writes nothing, and the first call after a
+    project root becomes known runs the start-up sweep.
+
+    A delegation while the agent file is malformed returns the load error and
+    writes no task record.
+
+    Two delegations to agents on one model endpoint whose parallel limit is 1
+    start two child runs. The second stays Pending until the first ends,
+    whether it settles, fails by timeout or is cancelled, and is then released,
+    and a cancel of the second while it is Pending starts no child.
+
+    A delegation with files and an expected output gives a brief that starts with
+    the brief text, then lists the files and the expected output.
+
+    A collect of a task whose owner process died after the server started says
+    that the task is abandoned and has no result, because the sweep ran again
+    before the collect.
+
+    A collect by task id after the server restarted returns the stored result of a
+    settled task, and says that an abandoned task has no result.
+
+    A cancel of a running task that another process owns reports that it runs in
+    another process, signals no process and leaves the task status running.
+  }
+
+  interface {
+    Accept a delegation, refuse it when its brief text is empty, and return the
+    result with the task id first once the child run settles, or return the task id
+    at once when the caller does not wait.
+
+    Offer each domain event of the child run of a waited delegation to the caller
+    as it happens.
+
+    Let a caller collect the result of a task by task id, returning nothing
+    while its task status is running, and let a caller cancel a task by
+    task id.
+
+    Keep a delegation Pending while its model endpoint has reached its
+    parallel limit, and release it first come first served.
+
+    List the tasks of one parent session id, or of every parent session id,
+    each with its task id, its agent, its task status and the time it was
+    created, after running the start-up sweep again.
+  }
+
+  decisions {
+    A separate service keeps TaskCore to the lifecycle of one task, and gives the
+    start-up sweep, the agent lookup and the live task registry one owner instead
+    of one for each front end. The files and the expected output are rendered into
+    the brief text because the child port carries one brief, and the fields exist
+    to push a parent toward a fuller brief.
+  }
+}

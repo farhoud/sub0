@@ -1,0 +1,677 @@
+// @sigil implements design/pi-driver.sigil PiDriver
+//
+// Starts an isolated pi 0.87 child in RPC mode, verifies that it loaded exactly the
+// declared skills, runs one brief to agent_settled, and stops it cleanly in every
+// exit case. The driver writes no task record: it hands the launch spec to its
+// caller in the run started event.
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
+import { parse as parseYaml } from 'yaml';
+import {
+  unavailableUsage,
+  type ChildOutcome,
+  type ChildPort,
+  type ChildRun,
+  type ChildRunRequest,
+  type DomainEvent,
+  type LaunchSpec,
+  type Measure,
+  type SessionUsage,
+  type Unavailable,
+} from '../core/types.js';
+import { CHILD_ENV, attachCommand, launchArgs } from './launch.js';
+import { missingSkills, prepareOverlay } from './overlay.js';
+import { PiRpcClient, type PiEvent, type PiResponse } from './rpc-client.js';
+
+export interface PiDriverOptions {
+  /** Handed over by DelegationService; the driver resolves no root of its own. */
+  projectRoot: string;
+  /** From TaskStore. */
+  sessionsFolder: string;
+  /** The pi program and any leading arguments. Defaults to the installed pi. */
+  piCommand?: string[];
+  env?: NodeJS.ProcessEnv;
+  /** Where pi keeps SYSTEM.md. Defaults to PI_CODING_AGENT_DIR or ~/.pi/agent. */
+  piAgentDir?: string;
+  /** How long to wait for pi to answer abort. */
+  abortWaitMs?: number;
+  /** How long to wait for an exit after closing stdin and after SIGTERM. */
+  killWaitMs?: number;
+  log?: (message: string) => void;
+}
+
+const MESSAGE_LIMIT = 300;
+const STDERR_TAIL_LIMIT = 4000;
+
+// pi events that need no domain event. Anything else unrecognized is logged.
+const QUIET_EVENTS = new Set([
+  'agent_start',
+  'agent_end',
+  'turn_start',
+  'message_start',
+  'tool_execution_update',
+  'queue_update',
+  'compaction_start',
+  'compaction_end',
+  'auto_retry_end',
+  'summarization_retry_scheduled',
+  'summarization_retry_attempt_start',
+  'summarization_retry_finished',
+  'bash_execution_update',
+  // Emitted by pi 0.87 for each session entry, though rpc.md does not list it.
+  'entry_appended',
+]);
+const DIALOG_METHODS = new Set(['select', 'confirm', 'input', 'editor']);
+
+export class PiDriver implements ChildPort {
+  private version: string | Unavailable | undefined;
+  private readonly live = new Set<PiChildRun>();
+
+  constructor(private readonly options: PiDriverOptions) {}
+
+  static attachCommand(spec: LaunchSpec): string[] {
+    return attachCommand(spec);
+  }
+
+  get piCommand(): string[] {
+    return this.options.piCommand ?? ['pi'];
+  }
+
+  piVersion(): string | Unavailable {
+    if (this.version === undefined) {
+      const [program, ...rest] = this.piCommand;
+      try {
+        this.version = execFileSync(program!, [...rest, '--version'], {
+          encoding: 'utf8',
+          timeout: 10_000,
+          env: { ...(this.options.env ?? process.env), ...CHILD_ENV },
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+      } catch (err) {
+        this.version = { unavailable: `pi --version failed: ${(err as Error).message}` };
+      }
+    }
+    return this.version;
+  }
+
+  start(request: ChildRunRequest, onEvent: (event: DomainEvent) => void): ChildRun {
+    const run = new PiChildRun(this, this.options, request, onEvent);
+    this.live.add(run);
+    const outcome = run.execute().finally(() => this.live.delete(run));
+    return { outcome, cancel: () => run.requestStop({ status: 'cancelled' }) };
+  }
+
+  /** Last resort when this process must exit now: SIGKILL every live child run. */
+  killAll(): void {
+    for (const run of this.live) run.forceKill();
+  }
+}
+
+type Stop = { status: 'cancelled' } | { status: 'failed'; failureKind: 'timeout'; message: string };
+type Raced<T> = { kind: 'value'; value: T } | { kind: 'stop' } | { kind: 'exit' };
+
+class PiChildRun {
+  private stop: Stop | null = null;
+  private settledSeen = false;
+  private finished = false;
+  private triggerStop!: () => void;
+  private readonly stopped = new Promise<void>((resolve) => (this.triggerStop = resolve));
+  private triggerSettled!: () => void;
+  private readonly settled = new Promise<void>((resolve) => (this.triggerSettled = resolve));
+  private child: ChildProcess | null = null;
+  private client: PiRpcClient | null = null;
+  private exit: Promise<{ code: number | null; signal: string | null }> | null = null;
+  private exited = false;
+  private spawnError: Error | null = null;
+  private stderrTail = '';
+  private textBuffer = '';
+  private readonly toolPaths = new Map<string, string>();
+  private lastAssistant: any = null;
+  private ready = false;
+  private pipeLost = false;
+  private unknownModel = false;
+  private sessionFile: string | undefined;
+  private timer: NodeJS.Timeout | null = null;
+  private readonly log: (message: string) => void;
+
+  constructor(
+    private readonly driver: PiDriver,
+    private readonly options: PiDriverOptions,
+    private readonly request: ChildRunRequest,
+    private readonly emit: (event: DomainEvent) => void,
+  ) {
+    this.log = options.log ?? ((m) => process.stderr.write(`subzero: ${m}\n`));
+  }
+
+  /** The first termination wins; a stop after agent_settled changes nothing. */
+  requestStop(stop: Stop): void {
+    if (this.stop !== null || this.settledSeen || this.finished) return;
+    this.stop = stop;
+    this.triggerStop();
+  }
+
+  async execute(): Promise<ChildOutcome> {
+    try {
+      return await this.main();
+    } finally {
+      this.finished = true;
+      if (this.timer !== null) clearTimeout(this.timer);
+      this.signalGroup('SIGKILL'); // no grandchild of the group may remain
+    }
+  }
+
+  forceKill(): void {
+    this.signalTree('SIGKILL');
+  }
+
+  private async main(): Promise<ChildOutcome> {
+    const { agent, taskId, brief } = this.request;
+
+    const missing = missingSkills(agent.skills);
+    if (missing.length > 0) {
+      return failed('skill_mismatch', `missing skill folder: ${missing.map((s) => `${s.name} (${s.folder})`).join(', ')}`);
+    }
+    if (this.stop !== null) return this.stoppedBeforeSpawn();
+
+    const overlay = prepareOverlay(this.options.projectRoot, taskId, agent.skills);
+    const env = this.options.env ?? process.env;
+    const agentDir = this.options.piAgentDir ?? env.PI_CODING_AGENT_DIR ?? path.join(homedir(), '.pi', 'agent');
+    if (existsSync(path.join(agentDir, 'SYSTEM.md'))) {
+      this.emit({
+        kind: 'warning',
+        message: `${path.join(agentDir, 'SYSTEM.md')} exists and reaches the child: -nc does not cover it`,
+      });
+    }
+
+    const command = [
+      ...this.driver.piCommand,
+      ...launchArgs({ taskId, agent, overlaySkills: overlay, sessionsFolder: this.options.sessionsFolder }),
+    ];
+    const launchSpec: LaunchSpec = {
+      command,
+      cwd: this.options.projectRoot,
+      envNames: Object.keys(CHILD_ENV),
+      version: this.driver.piVersion(),
+      skillFolders: overlay,
+      thinkingLevel: agent.thinking,
+    };
+    this.emit({ kind: 'run_started', launchSpec });
+    if (this.stop !== null) return this.stoppedBeforeSpawn();
+
+    this.spawnChild(command);
+    // The timeout starts at spawn and covers skill verification and the turn.
+    this.timer = setTimeout(
+      () => this.requestStop({ status: 'failed', failureKind: 'timeout', message: `timed out after ${agent.timeout}s` }),
+      agent.timeout * 1000,
+    );
+
+    const state = await this.race(this.client!.send({ type: 'get_state' }));
+    if (state.kind !== 'value') return this.interrupted(state.kind);
+    this.ready = true;
+    if (typeof state.value.data?.sessionFile === 'string') this.sessionFile = state.value.data.sessionFile;
+
+    const commands = await this.race(this.client!.send({ type: 'get_commands' }));
+    if (commands.kind !== 'value') return this.interrupted(commands.kind);
+    const mismatch = verifySkills(overlay.map(expectedSkillName), commands.value);
+    if (mismatch !== null) {
+      await this.killNow();
+      return failed('skill_mismatch', mismatch);
+    }
+    this.emit({ kind: 'skills_verified', skills: agent.skills.map((s) => s.name) });
+
+    const prompt = await this.race(this.client!.send({ type: 'prompt', message: brief }));
+    if (prompt.kind !== 'value') return this.interrupted(prompt.kind);
+    if (!prompt.value.success) {
+      await this.killNow();
+      return failed('error', bounded(this.withModelHint(`pi refused the prompt: ${prompt.value.error ?? 'no reason given'}`)));
+    }
+
+    const done = await this.race(this.settled);
+    if (done.kind !== 'value') return this.interrupted(done.kind);
+
+    // Settled: no termination applies from here on.
+    const text = await this.ask('get_last_assistant_text');
+    const stats = await this.ask('get_session_stats');
+    this.client!.close();
+    await this.waitExitOrKill();
+    return this.settledOutcome(text?.text ?? null, stats);
+  }
+
+  private spawnChild(command: string[]): void {
+    const [program, ...args] = command;
+    // A process group leader so the whole group can be signalled. Its stdio pipes
+    // stay attached and it is never unref'd, so pi sees EOF when this process dies.
+    const child = spawn(program!, args, {
+      cwd: this.options.projectRoot,
+      env: { ...(this.options.env ?? process.env), ...CHILD_ENV },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
+    });
+    this.child = child;
+    this.exit = new Promise((resolve) => {
+      child.once('exit', (code, signal) => {
+        this.exited = true;
+        resolve({ code, signal });
+      });
+      child.once('error', (err) => {
+        this.spawnError = err;
+        this.exited = true;
+        resolve({ code: null, signal: null });
+      });
+    });
+    child.stderr!.on('data', (chunk: Buffer) => {
+      this.stderrTail = (this.stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL_LIMIT);
+      // Remembered, since the warning can leave the tail on a long run.
+      if (/model\b.*\bnot found/i.test(this.stderrTail)) this.unknownModel = true;
+    });
+    this.client = new PiRpcClient(child.stdin!, child.stdout!, {
+      onEvent: (event) => this.onPiEvent(event),
+      onBadRecord: (record) => this.log(`${this.request.taskId}: ignoring a non-JSON line from pi: ${record.slice(0, 120)}`),
+    });
+  }
+
+  private race<T>(promise: Promise<T>): Promise<Raced<T>> {
+    return Promise.race([
+      promise.then(
+        (value): Raced<T> => ({ kind: 'value', value }),
+        (): Raced<T> => ({ kind: 'exit' }),
+      ),
+      this.stopped.then((): Raced<T> => ({ kind: 'stop' })),
+      this.exit!.then((): Raced<T> => ({ kind: 'exit' })),
+      this.client!.lost.then((): Raced<T> => ({ kind: 'exit' })),
+    ]);
+  }
+
+  private interrupted(kind: 'stop' | 'exit'): Promise<ChildOutcome> {
+    return kind === 'stop' ? this.terminate() : this.crashed();
+  }
+
+  /** Send one command after settlement; any failure leaves its data unavailable. */
+  private async ask(type: string): Promise<any> {
+    if (this.exited) return null;
+    try {
+      const response = await withTimeout(this.client!.send({ type }), 10_000);
+      return response?.success ? response.data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ---- pi events → domain events -----------------------------------------
+
+  private onPiEvent(event: PiEvent): void {
+    switch (event.type) {
+      case 'tool_execution_start': {
+        const target = targetPath(event.args);
+        if (target !== undefined && typeof event.toolCallId === 'string') this.toolPaths.set(event.toolCallId, target);
+        this.emit({ kind: 'tool_activity', phase: 'start', tool: String(event.toolName), ...(target ? { path: target } : {}) });
+        return;
+      }
+      case 'tool_execution_end': {
+        // pi sends no args on the end event; the path comes from its start event.
+        const target = targetPath(event.args) ?? this.toolPaths.get(String(event.toolCallId));
+        this.toolPaths.delete(String(event.toolCallId));
+        this.emit({
+          kind: 'tool_activity',
+          phase: 'end',
+          tool: String(event.toolName),
+          ...(target ? { path: target } : {}),
+          isError: event.isError === true,
+        });
+        return;
+      }
+      case 'message_update': {
+        // Deltas are buffered into one agent message, never forwarded per token.
+        const delta = event.assistantMessageEvent;
+        if (delta?.type === 'text_delta' && typeof delta.delta === 'string') this.textBuffer += delta.delta;
+        return;
+      }
+      case 'message_end': {
+        const message = event.message;
+        if (message?.role === 'assistant') {
+          this.lastAssistant = message;
+          const text = this.textBuffer || assistantText(message);
+          if (text) this.emit({ kind: 'agent_message', text });
+        }
+        this.textBuffer = '';
+        return;
+      }
+      case 'turn_end':
+        this.emit({ kind: 'turn_settled' });
+        return;
+      case 'auto_retry_start':
+        this.emit({ kind: 'retrying', ...(typeof event.attempt === 'number' ? { attempt: event.attempt } : {}) });
+        return;
+      case 'agent_settled':
+        // Only agent_settled settles a run; agent_end may still be followed by retries.
+        if (this.stop === null) {
+          this.settledSeen = true;
+          this.triggerSettled();
+        }
+        return;
+      case 'extension_ui_request':
+        // No dialog can be answered from here; a blocked dialog would hang the run.
+        if (DIALOG_METHODS.has(event.method) && typeof event.id === 'string' && this.child?.stdin?.writable) {
+          this.child.stdin.write(JSON.stringify({ type: 'extension_ui_response', id: event.id, cancelled: true }) + '\n');
+        }
+        return;
+      case 'extension_error':
+        this.log(`${this.request.taskId}: pi extension error: ${String(event.error).slice(0, 200)}`);
+        return;
+      case 'response':
+        return;
+      default:
+        if (!QUIET_EVENTS.has(event.type)) {
+          this.log(`${this.request.taskId}: ignoring unrecognized pi event type ${JSON.stringify(event.type)}`);
+        }
+    }
+  }
+
+  // ---- endings --------------------------------------------------------------
+
+  private settledOutcome(text: string | null, stats: any): ChildOutcome {
+    const usage = usageFromStats(stats);
+    const base = { usage, ...(this.sessionFile !== undefined ? { sessionFile: this.sessionFile } : {}) };
+    const message = this.lastAssistant;
+    if (message === null) {
+      return { ...base, lastAssistantText: text, status: 'failed', failureKind: 'error', message: 'no assistant message' };
+    }
+    const summary = text ?? assistantText(message);
+    switch (message.stopReason) {
+      case 'length':
+        return { ...base, lastAssistantText: summary, status: 'truncated' };
+      case 'error':
+        return {
+          ...base,
+          lastAssistantText: summary,
+          status: 'failed',
+          failureKind: 'error',
+          message: bounded(this.withModelHint(String(message.errorMessage ?? 'pi reported an error'))),
+        };
+      case 'aborted':
+        return { ...base, lastAssistantText: summary, status: 'cancelled' };
+      default:
+        return { ...base, lastAssistantText: summary, status: 'completed' };
+    }
+  }
+
+  /** pi starts with an unknown model id on a known provider and only warns on stderr. */
+  private withModelHint(message: string): string {
+    return this.unknownModel ? `unknown model: ${this.request.agent.model}: ${message}` : message;
+  }
+
+  private stoppedBeforeSpawn(): ChildOutcome {
+    const stop = this.stop!;
+    return {
+      lastAssistantText: null,
+      usage: unavailableUsage('the child run ended before pi started'),
+      ...(stop.status === 'failed' ? { status: 'failed', failureKind: stop.failureKind, message: stop.message } : { status: 'cancelled' }),
+    };
+  }
+
+  /**
+   * Cancel or timeout: clear_queue, abort (up to abortWaitMs), close stdin, then
+   * SIGTERM and SIGKILL to the process group. The status comes from the stop.
+   */
+  private async terminate(): Promise<ChildOutcome> {
+    const stop = this.stop!;
+    const client = this.client!;
+    let text: string | null = null;
+    let stats: any = null;
+    if (!this.exited) {
+      await withTimeout(client.send({ type: 'clear_queue' }), 1000).catch(() => undefined);
+      const aborted = await withTimeout(client.send({ type: 'abort' }), this.options.abortWaitMs ?? 5000).catch(() => null);
+      if (aborted?.success && !this.exited) {
+        text = (await withTimeout(client.send({ type: 'get_last_assistant_text' }), 1000).catch(() => null))?.data?.text ?? null;
+        stats = (await withTimeout(client.send({ type: 'get_session_stats' }), 1000).catch(() => null))?.data ?? null;
+      }
+      // pi's bash tool detaches its shells; stop them while pi still owns them.
+      this.signalDescendants('SIGKILL');
+      client.close();
+      await this.waitExitOrKill();
+    }
+    const exit = await this.exit!;
+    this.emit({ kind: 'run_exited', code: exit.code, signal: exit.signal });
+    return {
+      lastAssistantText: text,
+      usage: stats ? usageFromStats(stats) : unavailableUsage('pi did not report usage before it was stopped'),
+      ...(this.sessionFile !== undefined ? { sessionFile: this.sessionFile } : {}),
+      ...(stop.status === 'failed' ? { status: 'failed', failureKind: stop.failureKind, message: stop.message } : { status: 'cancelled' }),
+    };
+  }
+
+  /** pi exited, or its pipe was lost, before the run settled. */
+  private async crashed(): Promise<ChildOutcome> {
+    // A lost pipe can leave pi running; it must not hold the run open.
+    if (!this.exited && !(await this.exitedWithin(300))) {
+      this.pipeLost = true;
+      this.signalDescendants('SIGKILL');
+      this.client?.close();
+      await this.waitExitOrKill();
+    }
+    const exit = await this.exit!;
+    const tail = this.stderrTail.trim();
+    if (tail !== '') this.emit({ kind: 'stderr_tail', text: tail });
+    this.emit({ kind: 'run_exited', code: exit.code, signal: exit.signal });
+    const usage = unavailableUsage('pi exited before it reported usage');
+    const session = this.sessionFile !== undefined ? { sessionFile: this.sessionFile } : {};
+    if (this.spawnError !== null) {
+      return { lastAssistantText: null, usage, status: 'failed', failureKind: 'crashed', message: bounded(`could not start pi: ${this.spawnError.message}`) };
+    }
+    if (this.pipeLost) {
+      return { ...session, lastAssistantText: null, usage, status: 'failed', failureKind: 'crashed', message: 'lost the pipe to pi' };
+    }
+    if (this.unknownModel) {
+      return { lastAssistantText: null, usage, status: 'failed', failureKind: 'error', message: bounded(`unknown model: ${this.request.agent.model}`) };
+    }
+    if (exit.code === 0 && this.lastAssistant === null) {
+      return { ...session, lastAssistantText: null, usage, status: 'failed', failureKind: 'error', message: 'no assistant message' };
+    }
+    const how = exit.signal !== null ? `signal ${exit.signal}` : `code ${exit.code}`;
+    return { ...session, lastAssistantText: null, usage, status: 'failed', failureKind: 'crashed', message: bounded(`pi exited mid-turn with ${how}`) };
+  }
+
+  private async killNow(): Promise<void> {
+    this.client?.close();
+    this.signalTree('SIGKILL');
+    await this.exit;
+  }
+
+  private async waitExitOrKill(): Promise<void> {
+    const wait = this.options.killWaitMs ?? 2000;
+    if (await this.exitedWithin(wait)) return;
+    // On SIGTERM pi also kills the shells its bash tool detached.
+    this.signalTree('SIGTERM');
+    if (await this.exitedWithin(wait)) return;
+    this.signalTree('SIGKILL');
+    await this.exit;
+  }
+
+  private async exitedWithin(ms: number): Promise<boolean> {
+    if (this.exited) return true;
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), ms)));
+    const result = await Promise.race([this.exit!.then(() => true as const), timedOut]);
+    clearTimeout(timer);
+    return result;
+  }
+
+  /**
+   * Signal pi's group and the group of every descendant of pi. pi's bash tool
+   * spawns detached shells, which a signal to pi's own group does not reach.
+   */
+  private signalTree(signal: NodeJS.Signals): void {
+    const pid = this.child?.pid;
+    if (pid === undefined || this.exited) return this.signalGroup(signal);
+    const targets = [pid, ...descendants(pid)];
+    for (const target of targets) {
+      try {
+        process.kill(-target, signal);
+      } catch {
+        try {
+          process.kill(target, signal);
+        } catch {
+          // already gone
+        }
+      }
+    }
+  }
+
+  /** Signal the groups of pi's descendants, not pi itself, while pi is alive. */
+  private signalDescendants(signal: NodeJS.Signals): void {
+    const pid = this.child?.pid;
+    if (pid === undefined || this.exited) return;
+    for (const target of descendants(pid)) {
+      try {
+        process.kill(-target, signal);
+      } catch {
+        try {
+          process.kill(target, signal);
+        } catch {
+          // already gone
+        }
+      }
+    }
+  }
+
+  /**
+   * Signal pi's own process group. After pi is reaped its id is safe to use only
+   * while a member of the group is still alive.
+   */
+  private signalGroup(signal: NodeJS.Signals): void {
+    const pid = this.child?.pid;
+    if (pid === undefined) return;
+    if (this.exited && !groupHasMembers(pid)) return;
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      // the group is already gone
+    }
+  }
+}
+
+function failed(failureKind: 'skill_mismatch' | 'error', message: string): ChildOutcome {
+  return { lastAssistantText: null, usage: unavailableUsage('pi did not run a turn'), status: 'failed', failureKind, message };
+}
+
+/**
+ * The name pi gives the skill in a folder: its SKILL.md frontmatter name, or the
+ * folder name when there is none.
+ */
+export function expectedSkillName(folder: string): string {
+  try {
+    const text = readFileSync(path.join(folder, 'SKILL.md'), 'utf8');
+    const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+    const name = match ? (parseYaml(match[1]!) as { name?: unknown } | null)?.name : undefined;
+    if (typeof name === 'string' && name !== '') return name;
+  } catch {
+    // fall back to the folder name, as pi does
+  }
+  return path.basename(folder);
+}
+
+/** Compare the skills pi loaded with the declared ones; null when they are equal. */
+export function verifySkills(expected: string[], response: PiResponse): string | null {
+  if (!response.success) return bounded(`get_commands failed: ${response.error ?? 'no reason given'}`);
+  const commands: any[] = Array.isArray(response.data?.commands) ? response.data.commands : [];
+  const loaded = commands.filter((c) => c?.source === 'skill').map((c) => String(c.name ?? '').replace(/^skill:/, ''));
+  const extra = loaded.filter((name) => !expected.includes(name));
+  const missing = expected.filter((name) => !loaded.includes(name));
+  const counted = loaded.length === expected.length;
+  if (extra.length === 0 && missing.length === 0 && counted) return null;
+  const parts = [];
+  if (!counted && extra.length === 0 && missing.length === 0) {
+    parts.push(`pi loaded ${loaded.length} skills for ${expected.length} declared folders; two declare the same name`);
+  }
+  if (extra.length > 0) parts.push(`extra skill ${extra.join(', ')}`);
+  if (missing.length > 0) parts.push(`missing skill ${missing.join(', ')}`);
+  return `skill verification failed: ${parts.join('; ')}`;
+}
+
+function groupHasMembers(pgid: number): boolean {
+  try {
+    const listing = execFileSync('ps', ['-A', '-o', 'pgid='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return listing.split('\n').some((line) => Number(line.trim()) === pgid);
+  } catch {
+    return false;
+  }
+}
+
+/** Every live descendant of a process, from one ps listing. */
+function descendants(root: number): number[] {
+  let listing: string;
+  try {
+    listing = execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return [];
+  }
+  const children = new Map<number, number[]>();
+  for (const line of listing.split('\n')) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+    if (!pid || ppid === undefined || Number.isNaN(ppid)) continue;
+    children.set(ppid, [...(children.get(ppid) ?? []), pid]);
+  }
+  const found: number[] = [];
+  const queue = [root];
+  while (queue.length > 0) {
+    for (const child of children.get(queue.shift()!) ?? []) {
+      found.push(child);
+      queue.push(child);
+    }
+  }
+  return found;
+}
+
+function targetPath(args: unknown): string | undefined {
+  if (typeof args !== 'object' || args === null) return undefined;
+  const a = args as Record<string, unknown>;
+  for (const key of ['path', 'file_path', 'filePath', 'file', 'directory', 'dir']) {
+    if (typeof a[key] === 'string' && a[key] !== '') return a[key] as string;
+  }
+  return undefined;
+}
+
+function assistantText(message: any): string {
+  if (!Array.isArray(message?.content)) return typeof message?.content === 'string' ? message.content : '';
+  return message.content
+    .filter((part: any) => part?.type === 'text' && typeof part.text === 'string')
+    .map((part: any) => part.text)
+    .join('');
+}
+
+function measure(value: unknown, reason: string): Measure {
+  return typeof value === 'number' && Number.isFinite(value) ? value : { unavailable: reason };
+}
+
+/** Fill the session usage from get_session_stats; what pi does not report stays unavailable. */
+export function usageFromStats(stats: any): SessionUsage {
+  if (stats === null || typeof stats !== 'object') return unavailableUsage('pi did not report session stats');
+  const tokens = stats.tokens ?? {};
+  const context = stats.contextUsage ?? {};
+  return {
+    inputTokens: measure(tokens.input, 'pi did not report input tokens'),
+    outputTokens: measure(tokens.output, 'pi did not report output tokens'),
+    cacheReadTokens: measure(tokens.cacheRead, 'pi did not report cache reads'),
+    cacheWriteTokens: measure(tokens.cacheWrite, 'pi did not report cache writes'),
+    totalTokens: measure(tokens.total, 'pi did not report total tokens'),
+    cost: measure(stats.cost, 'pi did not report cost'),
+    contextTokens: measure(context.tokens, 'pi did not report context use'),
+    contextWindow: measure(context.contextWindow, 'pi did not report the context window'),
+    contextPercent: measure(context.percent, 'pi did not report context use'),
+  };
+}
+
+function bounded(text: string): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  return oneLine.length > MESSAGE_LIMIT ? `${oneLine.slice(0, MESSAGE_LIMIT - 1)}…` : oneLine;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise<T>((_, reject) => (timer = setTimeout(() => reject(new Error('timed out')), ms))),
+  ]);
+}

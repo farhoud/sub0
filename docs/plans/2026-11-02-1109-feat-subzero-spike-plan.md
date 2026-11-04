@@ -18,7 +18,7 @@ deepened: 2026-11-02
 
 - **Objective:** We know, from measured numbers, whether handing a heavy skill's sub-agent work from Claude Code to a local Qwen model through subzero gives results good enough to use, at what cost and speed, while the main conversation stays clean — enough to decide whether to build subzero v0.1.
 - **Means:** a minimal subzero (pi child driver, task store, Claude Code plugin with an MCP `delegate` tool) driving sigil-evaluate's interpreter children on pi + Qwen, compared against the same skill with Claude interpreter children (KTD2, KTD9, KTD10).
-- **Authority:** Product Contract Requirements win on behavior; KTDs win on mechanism; the design docs in `docs/` are background and lose to this plan where they disagree (they are corrected in U1).
+- **Authority:** Product Contract Requirements win on behavior; KTDs win on mechanism; the design docs in `docs/` are background and lose to this plan where they disagree (they are corrected in U1). The sigil contracts in `design/` win over this plan wherever they differ; this plan was brought into line with them after decisions made while writing them.
 - **Stop conditions:** stop and return to brainstorming if U1 shows that a Claude Code subagent cannot be kept from using its Agent tool, cannot call a plugin MCP tool, or cannot reach the sigil skill files. Stop U8 early if B cannot reach a completed ingest on Slotted at any thinking level; run B-control before recording that as the result, so the cause is known.
 - **Execution profile:** one developer machine with Claude Code 2.1.285, pi 0.87.0, Node 22, Deno, the `r9700/Qwen3.8` endpoint in `~/.pi/agent/models.json`, pi logged into Anthropic for B-control (today it holds only an xAI login), and built sigil binaries. Live model runs happen in U1, in the live checks of U3–U6, in U7's dry runs, and in U8.
 - **Who finishes:** an implementer (`ce-work` or a person) completes U1–U7. U8 is run by the user with the harness from U7, and its decision is written by the user.
@@ -40,21 +40,21 @@ Research for this plan changed one premise in the docs: Claude Code subagents *c
 ### Requirements
 
 **Delegation**
-- R1. A Claude Code session with the subzero plugin can call `delegate` with an agent name and a brief, and receives exactly one bounded result per call, with the task id first and the summary at most the result budget (2k tokens by default).
+- R1. A Claude Code session with the subzero plugin can call `delegate` with an agent name and a brief, and receives exactly one bounded result per call, with the task id first and the summary at most the result budget (fixed at 2000 tokens, counted by estimate).
 - R2. A child sees exactly the skills its agent declares; a missing skill folder or any difference between the declared and loaded skill sets fails the call as `skill_mismatch` before the brief is sent.
 - R3. A child runs on the model and thinking level its agent declares, under the user's own pi login, with no user or project extensions, context files, prompt templates or other skills.
-- R4. A child that hangs, crashes, overruns its timeout or is cancelled ends as a typed failure (`timeout`, `crashed`, `cancelled`, `error`); the parent call never hangs, and no pi process outlives Esc, a timeout, or the end of the Claude session.
+- R4. A child that hangs, crashes or overruns its timeout ends as a typed failure (`timeout`, `crashed`, `error`, or `skill_mismatch` per R2), and a cancelled child ends with the status `cancelled` and no failure kind; the parent call never hangs, and no pi process outlives Esc, a timeout, or the end of the Claude session. The timeout is a required number of seconds from spawn to settlement and does not count a wait in `Pending`.
 - R5. A call that runs longer than a minute keeps the parent informed with progress at least every 60 seconds; a caller can also start a call without waiting and collect it later with `await`.
-- R6. At most one child per model endpoint runs at a time; further calls wait their turn instead of failing.
+- R6. The agent file can cap, with a `parallel` limit on an `endpoints:` entry, how many children of one model endpoint (the provider part of `provider/model`) one process runs at a time, shared by every agent on it; further calls wait their turn, first come first served, instead of failing. A model endpoint with no entry has no cap, and the cap counts only the children of one process, not a terminal `subzero run` or a second session.
 
 **Tasks**
-- R7. Every call creates a task whose record outlives the parent session: `tasks` lists the tasks of the current conversation, `subzero attach` opens the child's session in the pi TUI, and `subzero show` exports its transcript.
-- R8. subzero makes no snapshots or copies of workspace files and gates no writes; a child is limited only by its tool list, and the result lists changed files from git when the workspace is a git repo.
+- R7. Every call creates a task whose record outlives the parent session: `tasks` lists the tasks of the current conversation (at most 50, running first), a task whose owner process died is marked `abandoned`, `subzero attach` opens the child's session in the pi TUI, and `subzero show` exports its transcript.
+- R8. subzero makes no snapshots or copies of workspace files and gates no writes; a child is limited only by its tool list, and the result carries no list of changed files. The user reviews the tree with git, including when a parent and a child write the same files, and the README says so.
 
 **Experiment**
 - R9. In setup B, the sigil-evaluator subagent starts every interpreter through `delegate` and none through Claude's Agent tool, and the main conversation loads no sigil skill or reference.
 - R10. An interpreter child writes its claim rows to the exact answer file its brief names, in the form `sigilc ingest` accepts.
-- R11. A and B run on the planted Slotted design with the same Claude model and effort for the evaluator. A's interpreter subagents inherit the evaluator's model. Two extra arms separate causes: A-cheap, where A's interpreter subagent runs on Haiku, and B-control, where B's interpreter runs through subzero/pi on the same Claude model as A's interpreters. Each run records: planted-problem outcomes, final ingest state, re-asks used, units left unread, token usage split into main conversation / evaluator subagent / interpreter children, wall time, and peak interpreter context.
+- R11. A and B run on the planted Slotted design with the same Claude model and effort for the evaluator. A's interpreter subagents inherit the evaluator's model. Three extra arms separate causes: A-cheap, where A's interpreter subagent runs on Haiku, B-control, where B's interpreter runs through subzero/pi on the same Claude model as A's interpreters, and B-low, where B's interpreter runs at the thinking level `low`. Each run records: planted-problem outcomes, final ingest state, re-asks used, units left unread, token usage split into main conversation / evaluator subagent / interpreter children, wall time, interpreter context use at settle, the thinking level of each pi interpreter, and any interpreter write outside its answer file.
 - R12. The A/B results and the go / no-go decision for v0.1 are written down in one document.
 
 ### Key Decisions
@@ -99,13 +99,13 @@ Research for this plan changed one premise in the docs: Claude Code subagents *c
 - KTD2. **Ports and adapters from day one.** A host-neutral core (tasks, runs, turns, policies, result shaping) talks to a `ChildPort` implemented only by the pi driver and is driven by a `ParentPort` implemented only by the MCP server and the CLI (design §2). (session-settled: user-approved — chosen over a throwaway prototype: the spike becomes the start of v0.1 at the cost of some structure)
 - KTD3. **Own pi RPC client, targeting pi 0.87.** It splits stdout on LF only, decodes UTF-8 from a byte buffer, correlates responses by `id`, and treats `agent_settled` as done. pi's exported client is not used: its 60-second wait is too short for local models. Event types the client does not recognize are logged and ignored; pi 1.x support is v0.1.
 - KTD4. **Child launch and verification.** Launch flags follow target §3.1 for 0.87: `--mode rpc --offline -na -ne -nc -np --no-themes -ns --skill <overlay>/<name>… --model … --thinking … --tools … --session-dir <store>/sessions --session-id <task-id> --name subzero:<agent>:<task-id>`, cwd = project root, env `PI_OFFLINE=1 PI_TELEMETRY=0`. After `get_state`, `get_commands` entries with `source: "skill"` must equal the declared set (R2). The overlay copies each declared skill folder side by side into `.agents/subzero/tasks/<task-id>/skills/`, so sibling `../` paths keep working.
-- KTD5. **Process ownership.** Each child is spawned as the leader of its own process group, with stdio pipes kept and the handle never unref'd. Cancel and timeout go `clear_queue` → `abort` (5 s) → close stdin → SIGTERM to the group → SIGKILL to the group. If the server dies, pi sees stdin EOF and exits; a start-up sweep marks any run without a clean exit as `parent_gone` (target §2.6).
-- KTD6. **Task store layout per design §3.6**, under `<project>/.agents/subzero/`: append-only `index.jsonl` (latest line per task wins), `tasks/<id>/task.json` with the frozen agent and LaunchSpec, `tasks/<id>/events.jsonl`, `tasks/<id>/turns/1.json`, and `sessions/` for pi. The task id `sz-` plus six base32 characters is also the pi session id. The project root comes from `SUBZERO_PROJECT_DIR` (set in `.mcp.json` from `${CLAUDE_PROJECT_DIR}`), then MCP `roots/list`, then the CLI's cwd for `subzero` commands; the MCP server never uses its own cwd.
-- KTD7. **Concurrency is a slot per model endpoint** (the provider part of `provider/model`), default 1, held as a lock file under `.agents/subzero/locks/` that records the holder's pid, so the MCP server and a `subzero run` from a terminal share it (R6). A lock whose pid is no longer alive is taken over. A waiting call is a run in `Pending` and still sends progress.
-- KTD8. **MCP surface.** Four tools: `delegate(agent, brief, files?, expected_output?, wait?=true)`, `tasks(task?)`, `await(tasks, timeout_s)`, `cancel(task)`. Only `delegate` sets `_meta["anthropic/alwaysLoad"]: true`. When the request carries a progress token, progress goes out on every domain event and on a 30-second heartbeat. MCP `notifications/cancelled` for a waited call cancels its task (KTD5). Server `instructions` carry only the delegation rules: write a self-contained brief; the child cannot see this conversation.
+- KTD5. **Process ownership.** Each child is spawned as the leader of its own process group, with stdio pipes kept and the handle never unref'd. Cancel and timeout go `clear_queue` → `abort` (5 s) → close stdin → SIGTERM to the group → SIGKILL to the group. If the server dies, pi sees stdin EOF and exits; a start-up sweep marks a task whose latest index line says running, and whose owner process (its pid and start time, recorded on the task's first index line) is gone or has another start time, as `abandoned`. The sweep runs at every start-up and again before a collect, a cancel or a listing, signals no process, and a stored result outranks a later `abandoned` line. The result is written in one step before its index line.
+- KTD6. **Task store layout per design §3.6**, under `<project>/.agents/subzero/`: append-only `index.jsonl` (latest line per task wins), `tasks/<id>/task.json` with the frozen agent and LaunchSpec, `tasks/<id>/events.jsonl`, `tasks/<id>/turns/1.json`, and `sessions/` for pi. The task id `sz-` plus six base32 characters is also the pi session id. The project root comes from `SUBZERO_PROJECT_DIR` (set in `.mcp.json` from `${CLAUDE_PROJECT_DIR}`), then MCP `roots/list`, then the CLI's cwd for `subzero` commands; the MCP server never uses its own cwd. The delegation service resolves it once per process and hands the same root to the agent file, the task record and the child; an empty `SUBZERO_PROJECT_DIR` counts as unset, the first reported root wins, the root is absolute with symbolic links resolved, and when none resolves every call returns an error that names `SUBZERO_PROJECT_DIR`. The store folder is created readable by its owner only, with its own `.gitignore` that ignores everything in it; the user's own `.gitignore` is never edited.
+- KTD7. **Concurrency is an optional cap per model endpoint** (the part of `provider/model` before the first slash). An `endpoints:` entry holds `parallel`, a positive whole number, and every agent on that endpoint shares it; an endpoint with no entry has no cap, and an entry that no agent belongs to is a load error. The delegation service counts the live children of its own process only and keeps a waiting call in `Pending`, released first come first served, still sending progress; the wait does not count toward the timeout. There are no lock files and nothing is signalled or locked across processes, so a terminal `subzero run` or a second session is not counted (R6). The README says so.
+- KTD8. **MCP surface.** Four tools: `delegate(agent, brief, files?, expected_output?, wait?=true)`, `tasks(task?)`, `await(tasks, timeout_s)`, `cancel(task)`. Only `delegate` sets `_meta["anthropic/alwaysLoad"]: true`. When the request carries a progress token, progress goes out on every domain event, at most once a second, and on a 30-second heartbeat, as one line that names the agent, the kind of the latest event, the tool and its target path, and the elapsed time ("waiting" while `Pending`), never agent text or tool output. `tasks` returns at most 50 tasks, running first, with a notice of how many it left out. MCP `notifications/cancelled` for a waited call cancels its task (KTD5). Server `instructions` carry only the delegation rules: write a self-contained brief; the child cannot see this conversation.
 - KTD9. **The evaluator subagent gets skills by path, not by `skills:` preload.** The sigil skills are staged outside every Claude discovery path, and the subagent prompt names the `SKILL.md` paths to read, as sigil's own harness does (`sigil:scripts/slotted-benchmark/agents.ts:115-121`). Reason: the docs say a `disable-model-invocation` skill cannot be preloaded, and do not say whether `skillOverrides` blocks preloading, so `skills:` cannot keep the main conversation clean (R9). In B the subagent sets `disallowedTools: [Agent]` and its prompt routes interpretation to `delegate` with agent `sigil-interpreter`; in A it keeps the Agent tool and has a Claude `interpreter` subagent with Read, Glob, Grep and Write, mirroring `sigil:scripts/slotted-benchmark/agents.ts:32-39`.
 - KTD10. **Scoring without changing sigil.** Each run uses sigil's pass layout (`sigil:scripts/slotted-benchmark/agents.ts:41-48`): a pass directory, which is also Claude's cwd and project root, holding `root/` (the fixture copy), `store/` (an empty private claims store), `run/`, `skills/` (staged sigil skills) and `.agents/subzero.yaml`. The evaluator prompts name `root`, `store` and `run`. The Deno harness imports `preflightSlottedFixture`, `designViewFromTrees` and `validateLinkedEvidence` from the sigil checkout, and re-implements the unexported issue matcher (`sigil:scripts/slotted-benchmark/report.ts:420-554`, about 60 lines) with a pointer to its source. After a run it executes `sigilc check --root <pass>/root --store <pass>/store` itself and scores from that report, as sigil's benchmark does, so the score reflects what the interpreters read, not whether write-back succeeded. Review quality (the claims review fixture) stays a manual record.
-- KTD11. **Minimal config.** The spike reads one `.agents/subzero.yaml` with `skills:` (name → path) and `agents:` (`description`, `host: pi`, `model`, `thinking`, `skills`, `tools`, `timeout`). It is validated on load. The evaluator agents exist only as Claude agent files (U6). No layering, lock file or trust step (Scope Boundaries).
+- KTD11. **Minimal config.** The spike reads one `.agents/subzero.yaml` with `skills:` (name → path) and `agents:` (`description`, `host: pi`, `model`, `thinking`, `skills`, `tools`, `timeout`, a required number of seconds) and `endpoints:` (model endpoint → `parallel`, KTD7). It is validated on load, and any invalid agent, endpoint or a missing or malformed file is a load error that blocks every delegation until fixed. The file is read again on each delegation; an unknown agent name is an error that names every configured agent, with no task made. The evaluator agents exist only as Claude agent files (U6). No layering, lock file or trust step (Scope Boundaries).
 - KTD12. **Approval boundaries.** A plugin cannot ship allow rules (target §2.7). Interactive use relies on a user or project rule `"allow": ["mcp__plugin_subzero_subzero__*"]`, which `examples/sigil/README.md` tells the user to add; without it, the subagent's `delegate` call raises an approval prompt in the main session. The harness runs with `--permission-mode dontAsk` and an explicit allow-list, so an unlisted tool is denied, never prompted. Inside the pi child there is no approval step at all: the agent's tool list is the whole boundary (R8).
 
 ### High-Level Technical Design
@@ -134,7 +134,7 @@ sequenceDiagram
   participant D as pi driver
   participant Q as pi child
   E->>P: delegate(sigil-interpreter, brief, progressToken)
-  P->>P: new task, wait for endpoint slot (progress while Pending)
+  P->>P: new task, Pending while the endpoint's cap is reached (progress while Pending)
   P->>D: prepare overlay + LaunchSpec, spawn
   D->>Q: get_state
   D->>Q: get_commands
@@ -155,7 +155,7 @@ Run lifecycle inside one task:
 ```mermaid
 stateDiagram-v2
   [*] --> Pending: delegate
-  Pending --> Starting: endpoint slot free
+  Pending --> Starting: released, endpoint cap not reached
   Starting --> Failed: skill_mismatch / spawn error / unknown model
   Starting --> Live: skills verified, brief sent
   Live --> Settled: agent_settled
@@ -186,7 +186,7 @@ flowchart TB
 
 ### Assumptions
 
-- The `r9700` endpoint serves `Qwen3.8` with enough context for one interpreter request plus sigil-understand and sigil-egglog. Peak child context is measured (R11) rather than assumed.
+- The `r9700` endpoint serves `Qwen3.8` with enough context for one interpreter request plus sigil-understand and sigil-egglog. Context use at settle (the session usage reports the value at the end, not its peak) is measured (R11) rather than assumed.
 - `--plugin-dir` and `--agents` work together under `claude -p` with `--permission-mode dontAsk`; U1 confirms it before U7 depends on it.
 
 ### Risks
@@ -197,10 +197,10 @@ flowchart TB
 | `CLAUDE_PROJECT_DIR` is substituted in config but not exported to the server's env (docs disagree) | Pass it explicitly through `.mcp.json` `env` with `${CLAUDE_PROJECT_DIR}`; fall back to `roots/list` (KTD6) |
 | Qwen thinking levels are silently ignored by the server (target §3.3) | U8 runs B at two levels and compares token counts; a no-difference result is recorded, not hidden |
 | A local model loops or stalls inside a long tool chain | The per-agent `timeout` in the config maps to a `timeout` failure (R4) |
-| An interpreter writes outside the answer file | Accepted by R8; git shows it, and the U8 workspace is a throwaway copy |
+| An interpreter writes outside the answer file | Accepted by R8; git shows it, the U8 workspace is a throwaway copy, and the harness flags the pass from the interpreter's own transcript without failing it |
 | A user-level `~/.pi/agent/SYSTEM.md` reaches the child despite `-nc` | Warned per run (U3); U8 runs on a machine where it is absent or recorded |
 | pi's `grep`/`find` try to fetch helper binaries under `--offline` | Checked in U3's live run; the interpreter's tool list drops them if they fail |
-| Interpreter runs draw on the same local GPU as anything else the user runs | Concurrency 1 per endpoint (KTD7); U8 runs with the endpoint otherwise idle |
+| Interpreter runs draw on the same local GPU as anything else the user runs | `parallel: 1` on the r9700 endpoint (KTD7) holds only among this process's children; U8 runs with the endpoint otherwise idle and no second session |
 
 ---
 
@@ -213,7 +213,7 @@ package.json, tsconfig.json, build config     # U2
 hooks/hooks.json                              # U5
 src/
   config/        load + validate .agents/subzero.yaml           # U2
-  core/          task model, store, concurrency, result shaping # U4
+  core/          task model, store, delegation service, results # U4
   pi/            RPC client, driver, launch spec, overlay       # U3
   mcp/           MCP server (ParentPort)                        # U5
   cli/           subzero run | tasks | attach | show            # U4
@@ -293,26 +293,27 @@ docs/spike-results.md                                           # U8
   - Replaying each recorded live fixture produces the same domain-event sequence.
 - **Verification:** All driver tests pass against the fake pi, and one live run on Qwen settles with skills verified and a session file under `.agents/subzero/sessions`.
 
-### U4. Core task model, store, concurrency and CLI
+### U4. Core task model, store, delegation service and CLI
 
-- **Goal:** Tasks with stable ids and durable records, one live run per task, a per-endpoint queue, bounded results, and a CLI to run, list, attach and show.
+- **Goal:** Tasks with stable ids and durable records, one live run per task, a delegation service that owns the live registry, agent lookup, start-up and the optional per-endpoint cap, bounded results, and a CLI to run, list, attach and show.
 - **Requirements:** R1 (result shape), R4, R6, R7, R8.
 - **Dependencies:** U3.
-- **Files:** `src/core/ids.ts`, `src/core/task.ts`, `src/core/store.ts`, `src/core/concurrency.ts`, `src/core/result.ts`, `src/core/service.ts`, `src/cli/main.ts`, `test/core/*.test.ts`, `test/cli/cli.test.ts`.
+- **Files:** `src/core/ids.ts`, `src/core/task.ts`, `src/core/store.ts`, `src/core/result.ts`, `src/core/service.ts`, `src/cli/main.ts`, `test/core/*.test.ts`, `test/cli/cli.test.ts`.
 - **Approach:**
-  1. Task, Run and Turn per design §3.1, limited to one turn per task in the spike; store per KTD6; concurrency per KTD7.
-  2. Result per target §2.5: task id first, summary truncated to the budget with a visible marker, `changed_files` from `git status --porcelain` before and after when the root is a git repo, usage from `get_session_stats`.
-  3. Start-up sweep marks runs without a clean exit as `parent_gone`.
+  1. Task, Run and Turn per design §3.1, limited to one turn per task in the spike; store per KTD6; the cap per KTD7, inside `service.ts`.
+  2. Result per target §2.5, with no changed-file list: task id first, summary cut to the budget (head kept at a line boundary, an open code fence closed, a marker that names the omitted amount and says that `subzero show` has the full text; the status is unchanged), usage from `get_session_stats` with every field the driver cannot report marked unavailable and never zero.
+  3. Start-up sweep per KTD5: `abandoned`, by owner pid and start time.
   4. CLI: `subzero run <agent> "<brief>"`, `subzero tasks`, `subzero attach <task>` (the LaunchSpec without `--mode rpc`; its `--session-dir` and `--session-id` reopen the existing session, and `--session` must not be added because pi 0.87 exits when it is combined with `--session-id`; refused while a run is live), `subzero show <task>` (`pi --export`).
 - **Test scenarios:**
   - Two delegations to agents on the same endpoint → the second stays `Pending` until the first exits, then runs.
-  - A second process (a `subzero run` while the server holds the endpoint) waits for the slot; a lock left by a dead pid is taken over.
+  - A `subzero run` in a second process is not counted against the cap of the server's process.
+  - An unknown agent name returns the error that names every configured agent, and no task, record, index line or `Pending` run is made.
   - Two delegations on different endpoints → both run at once.
   - A cancelled `Pending` call never spawns pi.
   - A summary over budget is cut with a marker and the task id still comes first.
-  - In a git repo, a child that creates a file reports it in `changed_files`; outside a git repo the field is absent, not empty.
+  - A child that creates a file is not reported by subzero: the result has no changed-files field in or outside a git repo.
   - The index keeps the latest line per task after three status updates, and a corrupt trailing line is skipped with a warning.
-  - A task whose last run has no exit record at start-up is marked `parent_gone` and its status becomes `failed`.
+  - A task whose latest line says running and whose owner pid is dead, or alive with another start time, is marked `abandoned`; a live owner's task is left running; a task whose record holds a result stays settled whatever a later `abandoned` line says.
   - `attach` on a task with a live run is refused; on a settled task it builds the LaunchSpec without `--mode rpc` and without `--session`.
   - Integration: `subzero run` against the fake pi writes `task.json`, `events.jsonl`, `turns/1.json` and an index line, and prints the result.
 - **Verification:** A live `subzero run sigil-interpreter "<brief>"` against one prepared Slotted source writes an answer file that `sigilc ingest` accepts, and `subzero attach` opens the session afterwards.
@@ -336,7 +337,7 @@ docs/spike-results.md                                           # U8
   - `notifications/cancelled` for a waited call ends the task as `cancelled` and kills the child (fake pi).
   - `delegate` with an unknown agent returns a tool error naming the configured agents.
   - Closing the server's stdin while a child runs leaves no pi process (fake pi).
-  - `tasks` with no argument returns only tasks recorded for the current Claude session id.
+  - `tasks` with no argument returns only tasks recorded for the current Claude session id, at most 50, running first, with a notice of how many were left out; with no known session id it lists every task and says so.
 - **Verification:** In an interactive Claude Code session with `--plugin-dir`, a delegation to the fake-pi-backed agent shows progress, Esc cancels it with no orphan process, and a call longer than two minutes from the main conversation auto-backgrounds and its result arrives. Without the allow rule of KTD12, a `delegate` call made from a subagent raises an approval prompt in the main session; under `claude -p --permission-mode dontAsk` without it, the call is denied and the subagent sees the denial.
 
 ### U6. sigil experiment wiring
@@ -344,12 +345,12 @@ docs/spike-results.md                                           # U8
 - **Goal:** The two setups exist as files: subzero config for the interpreter, and evaluator agent definitions for A and B.
 - **Requirements:** R9, R10.
 - **Dependencies:** U5.
-- **Files:** `examples/sigil/.agents/subzero.yaml` (from U3), `examples/sigil/agents/evaluator-a.md`, `examples/sigil/agents/evaluator-b.md`, `examples/sigil/agents/interpreter-a.md`, `examples/sigil/agents/interpreter-a-cheap.md`, `examples/sigil/README.md`.
+- **Files:** `examples/sigil/.agents/subzero.yaml` (from U3), `examples/sigil/agents/evaluator-a.md`, `examples/sigil/agents/evaluator-b.md`, `examples/sigil/agents/interpreter-a.md`, `examples/sigil/agents/interpreter-a-cheap.md`, `examples/sigil/agents/evaluator-b-control.md`, `examples/sigil/agents/evaluator-b-low.md`, `examples/sigil/README.md`.
 - **Approach:**
-  1. Point the `sigil-interpreter` agent's skill paths from U3 at the pass layout's `skills/` folder (KTD10), and add `sigil-interpreter-control`: the same agent on `anthropic/<A's interpreter model>` for B-control (R11).
+  1. Point the `sigil-interpreter` agent's skill paths from U3 at the pass layout's `skills/` folder (KTD10), and add `sigil-interpreter-control`: the same agent on `anthropic/<A's interpreter model>` for B-control, and `sigil-interpreter-low`: the same as `sigil-interpreter` at thinking `low` for B-low (R11). `sigil-interpreter` and `sigil-interpreter-low` share the `r9700` endpoint entry with `parallel: 1`.
   2. `interpreter-a-cheap` is `interpreter-a` with `model: haiku`; A-cheap's evaluator points to it.
-  3. Evaluator prompts per KTD9: name the staged `SKILL.md` paths and the pass's `root`, `store` and `run` (KTD10); B adds the routing line ("to interpret a prepared sigilc request, call `delegate` with agent `sigil-interpreter`; the brief carries the request, binding and guidance paths, the exact answer file path and the round") and `disallowedTools: [Agent]` (B-control's copy routes to `sigil-interpreter-control`); A keeps the Agent tool and points to `interpreter-a`.
-  4. The README shows how to use B interactively: copy `evaluator-b.md` into `.claude/agents/`, and add `"allow": ["mcp__plugin_subzero_subzero__*"]` to a user or project settings file first (KTD12).
+  3. Evaluator prompts per KTD9: name the staged `SKILL.md` paths and the pass's `root`, `store` and `run` (KTD10); B adds the routing line ("to interpret a prepared sigilc request, call `delegate` with agent `sigil-interpreter`; the brief carries the request, binding and guidance paths, the exact answer file path and the round") and `disallowedTools: [Agent]` (B-control's copy routes to `sigil-interpreter-control` and B-low's to `sigil-interpreter-low`; the three differ only in that routing); A keeps the Agent tool and points to `interpreter-a`.
+  4. The README shows how to use B interactively: copy `evaluator-b.md` into `.claude/agents/`, and add `"allow": ["mcp__plugin_subzero_subzero__*"]` to a user or project settings file first (KTD12). It also warns that subzero does not track what a child writes (review the tree with git; keep a parent and a child, or two children, from writing the same files), that the store folder holds plain text and ignores itself, that the user's own `.gitignore` is not edited, that two Claude sessions in one project may mix the tasks listed for their session id, that the cap holds only among one process's children and an endpoint with no entry (a Claude model) has none, and that the command line has no cancel, so a `subzero run` ends only by Ctrl-C in its terminal.
 - **Test scenarios:** Test expectation: none -- configuration and prompts; their behavior is exercised by U7's dry run and U8.
 - **Verification:** One interactive B run on Slotted shows every interpreter call in the task store, none in Claude's subagent list, and a completed or explicitly incomplete ingest state in the evaluator's report.
 
@@ -361,9 +362,9 @@ docs/spike-results.md                                           # U8
 - **Files:** `bench/deno.json`, `bench/stage.ts`, `bench/run.ts`, `bench/score.ts`, `bench/usage.ts`, `bench/table.ts`, `bench/score_test.ts`, `bench/usage_test.ts`, `bench/README.md`.
 - **Approach:**
   1. Stage a fresh pass directory per KTD10: `root/` from `sigil:scripts/slotted-benchmark/fixtures/slotted-planted` with its `.sigil/config.json` and no claims store, empty `store/` and `run/`, the sigil skills in `skills/`, and `.agents/subzero.yaml` copied from `examples/sigil`; put the built `sigil` and `sigilc` first on PATH.
-  2. Run one of the four arms (A, A-cheap, B, B-control; R11): `claude -p --output-format stream-json --verbose` from the pass directory with that arm's `--agents` JSON, `--plugin-dir` for B, `--permission-mode dontAsk` and an allow-list covering Read, Write, Glob, Grep, `Bash(sigil *)`, `Bash(sigilc *)`, the shell programs the compute contract needs (`Bash(mkdir *)`, `Bash(cp *)`, `Bash(mv *)`, `Bash(ls)`, `Bash(ls *)`, `Bash(cat *)`, `Bash(test *)`, `Bash(cmp *)`, as in `sigil:scripts/slotted-benchmark/agents.ts:20-29`), plus `Agent` for A or `mcp__plugin_subzero_subzero__*` for B. The prompt asks the main conversation to have `sigil-evaluator` review the design.
+  2. Run one of the five arms (A, A-cheap, B, B-control, B-low; R11): `claude -p --output-format stream-json --verbose` from the pass directory with that arm's `--agents` JSON, `--plugin-dir` for B, `--permission-mode dontAsk` and an allow-list covering Read, Write, Glob, Grep, `Bash(sigil *)`, `Bash(sigilc *)`, the shell programs the compute contract needs (`Bash(mkdir *)`, `Bash(cp *)`, `Bash(mv *)`, `Bash(ls)`, `Bash(ls *)`, `Bash(cat *)`, `Bash(test *)`, `Bash(cmp *)`, as in `sigil:scripts/slotted-benchmark/agents.ts:20-29`), plus `Agent` for A or `mcp__plugin_subzero_subzero__*` for B. The prompt asks the main conversation to have `sigil-evaluator` review the design.
   3. Score per KTD10 against `SLOTTED_FIXTURE`.
-  4. Usage: main-conversation tokens from stream-json; evaluator and A-interpreter tokens from the subagent transcripts; B-interpreter tokens and peak context from the task store's `get_session_stats` records.
+  4. Usage: main-conversation tokens from stream-json; evaluator and A-interpreter tokens from the subagent transcripts; B-interpreter tokens and context use at settle from the task store's `get_session_stats` records, and the declared thinking level from each launch spec. Read each interpreter's writes from its own transcript with paths normalized against the pass directory, and flag, never fail, a pass with a write other than its answer file; a write into the claims store makes the score untrustworthy.
   5. Table: one markdown row per run, appended to `bench/results/`.
 - **Execution note:** Prove the scorer first: scoring a workspace from one of sigil's own `.benchmarks/` runs must reproduce that run's report.
 - **Patterns to follow:** `sigil:scripts/slotted-benchmark/claims.ts:528-600` for the check invocation and evidence validation; `sigil:scripts/agent-runner/hosts.ts:219-245` for Claude flags, except `--no-session-persistence` (it suppresses the subagent transcripts step 4 reads) and `--strict-mcp-config` (it drops the plugin's MCP server in B).

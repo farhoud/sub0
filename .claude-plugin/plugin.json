@@ -1,0 +1,5 @@
+{
+  "name": "subzero",
+  "version": "0.0.1-spike",
+  "description": "Delegate a skill's work to an isolated pi child on another model, through one MCP tool."
+}

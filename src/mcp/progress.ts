@@ -1,0 +1,97 @@
+// @sigil implements design/mcp-server.sigil McpServer (progress notification)
+//
+// One line per notification: the agent, the kind of the latest domain event, the
+// tool and its target path for tool activity, and the elapsed time. Never agent
+// text, tool output, other tool arguments, the stderr tail or skill content.
+import type { ChildRunState, DomainEvent } from '../core/types.js';
+
+export interface ProgressOptions {
+  minIntervalMs?: number;
+  heartbeatMs?: number;
+  now?: () => number;
+}
+
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes}m${String(seconds).padStart(2, '0')}s` : `${seconds}s`;
+}
+
+export function describeEvent(event: DomainEvent): string {
+  if (event.kind === 'tool_activity') return [event.kind, event.tool, event.path].filter(Boolean).join(' ');
+  return event.kind;
+}
+
+export class ProgressReporter {
+  private counter = 0;
+  private latest: string;
+  private lastSent = Number.NEGATIVE_INFINITY;
+  private trailing: NodeJS.Timeout | null = null;
+  private heartbeat: NodeJS.Timeout | null = null;
+  private readonly started: number;
+  private readonly minInterval: number;
+  private readonly heartbeatMs: number;
+  private readonly now: () => number;
+  private stopped = false;
+
+  constructor(
+    private readonly agent: string,
+    private readonly send: (progress: number, message: string) => void,
+    options: ProgressOptions = {},
+  ) {
+    this.now = options.now ?? Date.now;
+    this.minInterval = options.minIntervalMs ?? 1000;
+    this.heartbeatMs = options.heartbeatMs ?? 30_000;
+    this.started = this.now();
+    this.latest = 'starting';
+    this.armHeartbeat();
+  }
+
+  onState(state: ChildRunState): void {
+    if (state === 'Pending') this.update('waiting');
+  }
+
+  onEvent(event: DomainEvent): void {
+    this.update(describeEvent(event));
+  }
+
+  private update(what: string): void {
+    if (this.stopped) return;
+    this.latest = what;
+    const wait = this.lastSent + this.minInterval - this.now();
+    if (wait <= 0) {
+      this.flush();
+    } else if (this.trailing === null) {
+      // At most once a second, carrying the latest line.
+      this.trailing = setTimeout(() => {
+        this.trailing = null;
+        this.flush();
+      }, wait);
+    }
+  }
+
+  private line(): string {
+    return `${this.agent} · ${this.latest} · ${formatElapsed(this.now() - this.started)}`;
+  }
+
+  private flush(): void {
+    if (this.stopped) return;
+    this.lastSent = this.now();
+    this.counter += 1;
+    this.send(this.counter, this.line());
+    this.armHeartbeat();
+  }
+
+  /** After 30 seconds of silence, repeat the latest line with the new elapsed time. */
+  private armHeartbeat(): void {
+    if (this.heartbeat !== null) clearTimeout(this.heartbeat);
+    this.heartbeat = setTimeout(() => this.flush(), this.heartbeatMs);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.trailing !== null) clearTimeout(this.trailing);
+    if (this.heartbeat !== null) clearTimeout(this.heartbeat);
+  }
+}

@@ -2,6 +2,11 @@
 
 Status: analysis · 2026-10-30 · reads with [design.md](design.md) and [decisions.md](decisions.md).
 
+> **Update 2026-11-03.** Brought into line with the spike's Sigil contracts (`design/*.sigil`), which win
+> where they differ: the result has no changed-file list, a task whose owner process died is `abandoned`
+> (not `parent_gone`), concurrency is an optional parallel limit per model endpoint counted inside one
+> process, and the stop reason `aborted` is a `cancelled` status with no failure kind.
+
 Versions researched: **Claude Code 2.1.314** (latest, docs at code.claude.com) and **pi 1.4.0** (latest,
 `@earendil-works/pi-coding-agent`, read from the published package). Versions on the dev machine:
 **claude 2.1.285, pi 0.87.0**. Items marked 🧪 were tested on the dev machine. Items marked ⚠ are not
@@ -138,19 +143,21 @@ and the output you expect. The sub-agent cannot see this conversation. $ARGUMENT
 | MCP Tasks (2.1.304+, protocol 2026-07-28, TS SDK v2, CLI only) | Claude polls `tasks/get` and cancels with `tasks/cancel` | Phase 2: answer with a task only when the request's `_meta` advertises the extension. |
 
 Progress text should come from domain events, e.g. `semanticizer · turn 3 · read src/model.ts`, so the
-user sees real activity in the collapsed tool view and in `/tasks`.
+user sees real activity in the collapsed tool view and in `/tasks`. It is one line (agent, kind of the
+latest event, tool and target path, elapsed time; "waiting" while the run is `Pending`), at most one
+notification a second, with a heartbeat after 30 s of silence. It never carries agent message text, tool
+output, tool arguments other than a path, the stderr tail or skill content.
 
 ### 2.5 Results
 
 - The model sees `content`. `structuredContent` is supported, but always fill `content` too.
 - Result over 50k characters → Claude saves it to a file. Over 10k tokens → a warning. The cap is 25k.
   subzero's own budget (default 2k tokens) stays well below all of these.
-- Shape:
+- Shape (there is no changed-file list; the user reviews the tree with git):
 
 ```
 task: sz-7f3k2q · turn 2 · semanticizer · status: completed
-summary: <≤ budget, from pi get_last_assistant_text, truncated with a marker>
-changed_files: [...]        # from git after the turn
+summary: <≤ budget, from pi get_last_assistant_text, cut at a line boundary with a marker>
 usage: { tokens, cost, model, duration }
 next: continue(task) · ask(task, question) · tasks(task, detail: report)
 ```
@@ -171,8 +178,11 @@ The task id comes first, so it is still in Claude's history after compaction. If
   - Rely on the pipe: **don't detach the child**. When the server dies, pi's stdin hits EOF and pi
     shuts down cleanly (documented RPC behavior).
   - The session file stays, so the task can be continued later.
-  - At start-up, find tasks whose last run never exited cleanly and record the run as
-    `exit: parent_gone`. The task becomes `failed` but can still be continued.
+  - At start-up, and again before a collect, a cancel or a listing, find tasks whose latest index line
+    says running and whose owner process (pid and start time, recorded on the task's first index line)
+    is gone or has another start time, and mark them `abandoned`. The sweep signals no process. An
+    abandoned task has no result and can still be listed, attached and shown. A result already stored
+    in the record outranks a later `abandoned` line.
 
 ### 2.7 Permissions
 
@@ -188,8 +198,8 @@ The task id comes first, so it is still in Claude's history after compaction. If
   therefore just its **tool allow-list**:
   - `read-only` → `--tools read,grep,find,ls`
   - `workspace-write` → `read,grep,find,ls,edit,write,bash`
-  - subzero adds nothing stronger. A child with `bash` can write anywhere. Git is the record: the
-    result's `changed_files` comes from git, and the user reviews or reverts with git (§6.1).
+  - subzero adds nothing stronger. A child with `bash` can write anywhere. Git is the record: subzero
+    reports no changed files, and the user reviews or reverts with git (§6.1).
 - **Asking the user from a child:** extension dialogs in RPC mode emit `extension_ui_request` and
   **block until answered**. With `-ne` the only possible source is subzero's own extension.
   - v1: auto-reply `cancelled` and return `needs_input`.
@@ -253,7 +263,9 @@ the session as the user turn, and resume and attach show what was asked.
 5. Finish:
    - `get_last_assistant_text` gives the summary.
    - The last assistant `message_end.stopReason` gives the status: `stop` → completed,
-     `length` → completed but truncated, `error`/`aborted` → failed or cancelled.
+     `length` → truncated, `error` → failed with the failure kind `error` and a short bounded message,
+     `aborted` → cancelled (a status; no failure kind). A clean exit with no assistant message is
+     failed with the failure kind `error`.
    - `get_session_stats` gives tokens, cost and context use.
 6. Record the turn's entry range: first entry id from `get_entries since <previous leaf>`, plus the
    new `leafId`. This lets the task fork at that turn later.
@@ -289,8 +301,10 @@ with `thinkingLevelMap` low…max and `supportsReasoningEffort: true`. So `--mod
 - Otherwise `reasoning: high` and `low` may silently behave the same.
 - Validate when resolving the config: RPC `get_available_models` (JSON), or rely on the exit 1 at
   start-up for an unknown `--model`. `--list-models` exits 0 even when nothing matches.
-- **One local GPU serves one request at a time.** Default the concurrency per model endpoint to 1.
-  Otherwise parallel delegations queue inside the server and hit the parent's timeouts.
+- **One local GPU serves one request at a time.** Set `parallel: 1` on the model endpoint's entry in
+  `endpoints:`; there is no default cap. Otherwise parallel delegations queue inside the server and hit
+  the parent's timeouts. The limit counts only the children of one process: a terminal `subzero run` or a
+  second Claude window is not counted.
 - Under `--offline`, pi's model catalog is frozen. That's fine for `models.json` providers.
 
 ### 3.4 Task ↔ pi session mapping: continue, respawn, fork, ask, attach
@@ -346,7 +360,7 @@ option), instead of wrapping everything.
 | R4 | `CLAUDE_CODE_SESSION_ID` env goes stale after `/clear` | Take the session id from a SessionStart hook (it reruns after `/clear`) or from the `claudecode/toolUseId` `_meta` |
 | R5 | The parent writes thin briefs; a weak model then guesses | Server instructions and proxy-body rules; `files`/`expected_output` fields in the schema; let the child return `needs_input` with questions |
 | R6 | Small local models do worse at long tool loops | Narrow skills, tool allow-lists, a turn and wall-clock limit per agent, `length` reported as truncated |
-| R7 | Parent and child edit the same files | Default `read-only`. A write-enabled agent should own a path scope. Report `changed_files` back. |
+| R7 | Parent and child edit the same files | Default `read-only`. A write-enabled agent should own a path scope. subzero records no changed files; the README warns the user to review the tree with git. |
 | R8 | Skills written for Claude (`allowed-tools`, "use the Task tool") don't work in pi, which ignores `allowed-tools` | `subzero validate` flags host-specific references in skills bound to pi agents |
 | R9 | `~/.pi/agent/SYSTEM.md` is not covered by `-nc` | Detect it and warn, or use a shadow `PI_CODING_AGENT_DIR` with only `auth.json`/`models.json` symlinked |
 | R10 | Session transcripts may contain secrets | `.agents/subzero/` is gitignored; `prune` deletes old task records and their pi sessions |
@@ -453,15 +467,17 @@ Things this shape brings, all handled in the spike:
   the subagent (§2.4). That is fine: the evaluator must wait for each reading anyway. subzero sends
   progress every ≤60s so the idle timeout doesn't fire, and the main conversation can run the
   evaluator subagent in the background.
-- **Serial readings.** One local GPU serves one request at a time, so the seven interpreter tasks run
-  one after another (concurrency 1 per endpoint, §3.3). The evaluator can call `delegate` with
-  `wait: false` for all of them and `await` them together.
+- **Serial readings.** One local GPU serves one request at a time, so with `parallel: 1` on the endpoint
+  (§3.3) the seven interpreter tasks run one after another: the rest stay `Pending` ("waiting" in the
+  progress line). The evaluator can call `delegate` with `wait: false` for all of them and `await` them
+  together. The limit counts only this server process's children.
 - **Result size.** The interpreter's real output is the answer file its brief names, which
   `sigilc ingest` reads directly. Its `delegate` result only needs to say it finished.
 
 pi has no approval prompts or sandbox, and subzero adds none. The `tools` list is the only limit.
-subzero takes no snapshots and makes no copies of workspace files: **git is the record.** The result's
-`changed_files` comes from git, and the user reviews or reverts with git.
+subzero takes no snapshots and makes no copies of workspace files: **git is the record.** subzero
+reports no changed files, and the user reviews or reverts with git; the README warns about it,
+including when a parent and a child, or two children, write the same files.
 
 ### 6.2 Measures
 
@@ -483,8 +499,9 @@ Two setups, same design revision, same Claude model and effort for the evaluator
   This is the only way plain Claude Code gets the computed path.
 - **B (subzero):** main conversation → `sigil-evaluator` subagent → interpreters on pi + Qwen.
 
-Also record: main-conversation `/context` before and after, peak interpreter context, and the Qwen
-thinking levels (does `high` differ from `low`?).
+Also record: main-conversation `/context` before and after, interpreter context use at settle (pi reports
+the value at the end of the run, not its peak), and the Qwen thinking levels (does `high` differ from
+`low`? A separate B-low arm answers it, with its own agent definition at thinking `low`).
 
 ### 6.3 Plan
 
@@ -495,7 +512,7 @@ thinking levels (does `high` differ from `low`?).
 2. **Days 2–3. Task store and MCP server:** `index.jsonl` and `task.json` with the LaunchSpec;
    `subzero attach` (the pi TUI opens on the child session) and `subzero show`, for debugging Qwen runs.
    MCP tools `delegate`/`tasks`/`await`/`cancel` plus progress, loaded with `--plugin-dir`. Test Esc
-   cancel and session exit; per-endpoint concurrency 1.
+   cancel and session exit; an optional parallel limit per endpoint (`parallel: 1`).
 3. **Day 4. The evaluator subagent.** Install the sigil skills, hidden from the main agent; write
    `.claude/agents/sigil-evaluator.md`; run it once on Slotted and check that every reading goes
    through `delegate` and the main conversation never loads a sigil skill.
@@ -546,5 +563,5 @@ none of these are needed to answer the spike's question.
   kept for resume.
 - **Nested delegation can wait.** Running the evaluator as a native Claude subagent keeps every subzero child at depth 1. When a
   delegated child does need to delegate (v0.1), it gets subzero's pi extension (the only exception to
-  `-ne`) via `delegates:`, nested children share the parent's concurrency limits, and a waiting run
-  lends its slot to its child so depth 2 can't deadlock on one GPU (D14).
+  `-ne`) via `delegates:`, nested children share the parent's parallel limit, and a waiting run
+  lends its place under that limit to its child so depth 2 can't deadlock on one GPU (D14).

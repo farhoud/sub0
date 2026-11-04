@@ -1,0 +1,155 @@
+@design/agent-config.sigil from AgentConfig import {
+  agent definition, tool list, thinking level,
+}
+@design/task-store.sigil from TaskStore import {
+  task record, event log, parent session id,
+}
+
+component TaskCore {
+  goal {
+    Run each *task* from an agent definition and a brief on one child, keep it in a
+    durable task record, and return one bounded *result*.
+  }
+
+  state {
+    A task holds a *task id*, the frozen agent definition it was created from, a
+    *brief* and one *child run*. A task id is sz- followed by six base32
+    characters. The brief is the one self-contained text that the child receives,
+    and the child sees nothing else of the parent conversation.
+
+    A child run has a *child run state*. It is Pending until its caller
+    releases it, then moves through Starting and Live to Settled, and it can
+    also end Failed or Cancelled.
+
+    A failed child run carries one *failure kind*, which is timeout, crashed, error
+    or skill_mismatch. A cancelled child run carries no failure kind.
+
+    A result has a status of completed, truncated, failed or cancelled. It holds
+    the task id first, a *summary* and the *session usage*, and a failed result
+    also holds its failure kind. The status truncated means only that the child
+    stopped at its own length limit. The summary is cut to the *result budget*,
+    fixed at 2000 tokens and counted by estimate.
+
+    A session usage is the token count, the cost and the context use at settle of a
+    child run, as its driver reports them. Each field is optional, and a field that
+    the driver cannot report is unavailable and never zero.
+
+    A *launch spec* is the record of how a driver started a child run, without its
+    prompt: the command as one opaque list, the working directory, the names of its
+    environment variables and never their values, the version of the child
+    program, the skill folder paths and the thinking level that the driver set for
+    the child run. A field that the driver cannot report is unavailable.
+
+    A *domain event* is one step of a child run, such as run started, skills
+    verified, tool activity, agent message, turn settled and run exited. Tool
+    activity carries the tool name and its target path, and the run started event
+    carries the launch spec of the child run. Each domain event is written to the
+    event log of its task.
+  }
+
+  logic {
+    On a task request, create the task with a new task id, the frozen
+    agent definition and the brief, and write the task record with the status
+    running. The task id goes to the result and to the child port, and the
+    agent definition goes to the child port. The task record goes to the final
+    step, which writes the result into it. Keep the child run Pending until its
+    caller releases it. Check that the task holds exactly one brief, and pass
+    that brief to the child port when the child run is released, which starts
+    the child run and ends this part of the flow.
+
+    While the child run is live, write each domain event to the event log and offer
+    it to the caller, which ends that branch. When the run started event arrives,
+    write the launch spec it carries into the task record without reading it, which
+    ends that branch. When the child run settles, build the result with the task id
+    first, the summary cut to the result budget and the session usage. The result
+    goes to the final step. A failed child run builds its result with its
+    failure kind, and a cancelled child run builds it with the status cancelled and
+    no failure kind. Both go to the same final step. In the final step, write the
+    result into the task record and return the result to the caller, which ends
+    the flow.
+  }
+
+  constraints {
+    A task has at most one live child run, and a task request produces exactly one
+    result.
+
+    TaskCore must reach a child only through the *child port* and must not import
+    host-specific types. TaskCore requires the child port, which a child driver
+    provides, and does not depend on any child driver.
+
+    TaskCore requires the task record and depends on TaskStore, which provides
+    it. Only TaskCore may ask TaskStore to write a task record, and TaskStore
+    performs the write.
+
+    The result must not carry the *transcript*, tool output or skill content of the
+    child run.
+
+    TaskCore must not record or compute which files a child run changed, must not
+    snapshot or copy workspace files and must not gate writes. The child run is
+    limited only by its tool list, and what it writes is for the user to review
+    with git, including when a parent and a child write the same files.
+
+    A cancelled child run that is still Pending must never start a child. It
+    has the status cancelled, no failure kind, no session usage and no summary.
+
+    A summary longer than the result budget must be cut keeping its head at a line
+    boundary, with an open code fence closed, and must end with a visible marker
+    that names the omitted amount and says that subzero show with the task id has
+    the full text. The cut leaves the status unchanged, an empty summary stays
+    empty, and a truncated result whose summary is over the result budget carries
+    the marker as well.
+
+    A field of the session usage that the child run cannot report must be marked
+    unavailable and never reported as zero.
+
+    A launch spec must never hold the value of an environment variable, because
+    the task record is plain text, and TaskCore must write the launch spec into the
+    task record unread and must not depend on any flag that it holds.
+
+    TaskCore owns one brief for each task in the spike, so continue, ask, fork and
+    rerun are not offered.
+  }
+
+  cases {
+    A summary longer than the result budget is cut with a visible marker, the
+    status stays completed, and the task id is still first in the result.
+
+    A child run whose last assistant message has the stop reason error is Failed
+    with the failure kind error, and a cancelled child run carries no failure kind.
+
+    The run started event of a child run puts its launch spec in the task record
+    before the child run settles.
+  }
+
+  interface {
+    Accept a task request made of an agent definition, a brief and an optional
+    parent session id. Return the result, which never carries the transcript, with
+    the task id first once the child run settles, or let the caller leave the task
+    running and ask for its result later. A child run stays in the
+    child run state Pending until its caller releases it, so that the caller can
+    limit how many child runs run at the same time.
+
+    Cancel a live child run as cancelled, and return the result.
+
+    Offer each domain event of a live child run to the caller as it happens, and
+    offer a failure kind in the result of a failed child run.
+
+    Define the child port that a child driver implements: start a child run for a
+    task id, an agent definition and a brief, hand its launch spec to the caller in
+    the run started domain event, run it to settlement, cancel it, and report the
+    outcome, which is the last assistant text, the status, the failure kind of a
+    failed run and the session usage.
+  }
+
+  decisions {
+    The spike keeps one brief per task because each interpreter call is a fresh
+    single request, and the experiment does not need follow-up turns. Cancelled is
+    a status and not a failure kind, because a failure kind belongs to a failed
+    result that a parent received. The launch spec is a shape of TaskCore and not
+    of the pi driver, so that TaskCore, TaskStore and Cli carry no pi type. The
+    result budget is fixed because an
+    agent definition has no field for another value, and TaskCore keeps no list of
+    changed files because git is the record and the review of concurrent writers is
+    the user's.
+  }
+}

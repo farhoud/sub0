@@ -1,0 +1,127 @@
+component AgentConfig {
+  goal {
+    Load and validate the spike's agent configuration so that every other component
+    receives an agent definition whose skills are absolute folders.
+  }
+
+  state {
+    The configuration is one *agent file*, .agents/subzero.yaml, with a skills map
+    from skill name to *skill folder*, an endpoints map and an agents map of named
+    *agent definition* entries.
+
+    The endpoints map holds an entry for a *model endpoint*. A model endpoint
+    is the part of the model of an agent definition before its first slash, and
+    each agent definition belongs to the model endpoint of its model. The entry
+    holds the *parallel limit* of that model endpoint, a positive whole number
+    that is the most child runs that one process runs at the same time on it. A
+    model endpoint with no entry has no parallel limit, and every
+    agent definition on the same model endpoint shares its parallel limit.
+
+    An agent definition has a description, a host that is always pi, a model, a
+    *thinking level*, the names of its skills, a *tool list* and a *timeout*.
+
+    The timeout is a required number of seconds. It limits the wall-clock time of
+    a child run from its spawn to its settlement, including skill verification,
+    and it does not run while the child run is Pending.
+  }
+
+  logic {
+    On load, read the agent file, validate every agent definition against the
+    schema, and resolve each skill folder relative to the directory of the
+    agent file into an absolute path. The flow returns the validated agent
+    definitions to its caller, or stops with a *load error* that names the
+    offending agent definition, or says that the agent file is missing,
+    unreadable or malformed. One invalid agent definition fails the whole load.
+  }
+
+  constraints {
+    An agent definition must be rejected, naming it, when its host is not pi or
+    when its host is pi and it has no model.
+
+    An endpoints entry must be rejected with a load error that names its
+    model endpoint when its parallel limit is not a positive whole number, or
+    when no agent definition belongs to its model endpoint.
+
+    An agent definition must be rejected, naming it, when it has no timeout or its
+    timeout is not a positive number of seconds.
+
+    An agent definition that names a skill missing from the skills map must be
+    rejected with the agent and the skill both named.
+
+    A skill folder that does not exist on disk must still load. The missing folder
+    is reported only when a child is launched.
+
+    AgentConfig must read the agent file again on each call that asks for an
+    agent definition, so that an edit to it is picked up without a restart.
+
+    AgentConfig must read only the one agent file. It must not merge layers, write
+    subzero.lock or ask for repo trust in the spike, because those belong to the
+    agent definition format of a later version.
+
+    AgentConfig resolves the *project root* from SUBZERO_PROJECT_DIR first,
+    then from the roots that the parent adapter reports, and for the command
+    line from its working directory. It must never use the working directory of
+    the server process. It keeps no project root between calls, because
+    DelegationService asks once for each process and hands the answer to the
+    other components. It finds the agent file under the project root that its
+    caller hands over.
+
+    An empty SUBZERO_PROJECT_DIR counts as unset. When the parent adapter
+    reports several roots, the first one reported wins. The project root must
+    be an absolute path with its symbolic links resolved. When no source gives
+    a project root, AgentConfig must return an *unresolved root error* that
+    names SUBZERO_PROJECT_DIR as the setting to fix, and must resolve again on
+    the next call.
+  }
+
+  cases {
+    A valid file with one pi agent definition loads, and its skill folder entries
+    are absolute paths.
+
+    An unknown host value is rejected, and the error names the agent definition
+    that holds it.
+
+    A name that is not configured gives an unknown agent error that lists every
+    configured agent definition.
+
+    With no SUBZERO_PROJECT_DIR and no root reported by the parent adapter, the
+    project root is not resolved and the caller gets the unresolved root error.
+
+    Two agent definitions on the model endpoint r9700, whose entry has a
+    parallel limit of 1, are both given that parallel limit of 1, and an
+    agent definition on a model endpoint with no entry is given none. An entry
+    for r9770 that no agent definition belongs to gives a load error that names
+    r9770.
+
+    An agent file with one invalid agent definition gives a load error that names
+    it and returns no agent definition, not even a valid one.
+  }
+
+  interface {
+    Provide each configured agent definition by name, with its thinking level, its
+    tool list, its timeout and every skill folder resolved to an absolute folder.
+
+    Provide the model endpoint of each agent definition with the parallel limit
+    of that model endpoint, or none when its entry is missing.
+
+    List the names of every configured agent definition so that a caller can report
+    them in an error.
+
+    Return an *unknown agent error* that names the unknown name and every
+    configured agent definition when a name is not configured, so that a front end
+    can show it.
+
+    Return a load error that names the invalid agent definition, or says that the
+    agent file is missing, unreadable or malformed, so that a front end can show
+    it.
+
+    Provide the project root for a caller in the order the constraints give, or
+    return the unresolved root error when no source gives one.
+  }
+
+  decisions {
+    Skill folders resolve against the directory of the agent file and not the
+    working directory, so the same file behaves the same from the server, the
+    command line and the experiment harness.
+  }
+}

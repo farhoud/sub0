@@ -1,0 +1,8 @@
+node_modules/
+dist/
+# sigil generated state (sigil's own convention: only .sigil/config.json is tracked)
+.sigil/local.json
+.sigil/trees/
+.sigil/claims/
+.sigil/worlds/
+.sigil/tmp/

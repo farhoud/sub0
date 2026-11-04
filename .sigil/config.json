@@ -1,0 +1,11 @@
+{
+  "sigilVersion": "0.9.0",
+  "workspace": {
+    "name": "subzero-spike"
+  },
+  "files": {
+    "include": ["design/**/*.sigil"],
+    "exclude": [".git/**", "node_modules/**", "docs/**"]
+  },
+  "tools": {}
+}
