@@ -21,7 +21,11 @@ out({ type: 'assistant', parent_tool_use_id: null, session_id: session, message:
 
 const sub = join(process.env.FAKE_CLAUDE_PROJECTS, '-fake', session, 'subagents');
 mkdirSync(sub, { recursive: true });
-const report = mode === 'report' ? 'Final check: incomplete.\nHand-back state: incomplete' : 'I ran out of time.';
+const report = mode === 'report'
+  ? 'Final check: incomplete.\nHand-back state: incomplete'
+  : mode === 'failed'
+  ? 'The initial check was denied.\nHand-back state: failed'
+  : 'I ran out of time.';
 writeFileSync(join(sub, 'agent-e.jsonl'), JSON.stringify({ type: 'assistant', message: { id: 'e-1', usage: usage(4000, 400), content: [{ type: 'text', text: report }] } }) + '\n');
 writeFileSync(join(sub, 'agent-e.meta.json'), JSON.stringify({ agentType: 'sigil-evaluator' }));
 

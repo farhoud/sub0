@@ -82,10 +82,18 @@ export function agentsJson(spec: ArmSpec, effort: string | null): Record<string,
 
 const SHELL = ["sigilc", "sigil", "mkdir", "cp", "mv", "ls", "cat", "test", "cmp"];
 
-/** dontAsk with an explicit allow-list: anything unlisted is denied, never prompted. */
-export function allowList(spec: ArmSpec): string[] {
+/**
+ * dontAsk with an explicit allow-list: anything unlisted is denied, never prompted.
+ * The sigil tools are allowed by bare name, ./bin and the pass's absolute bin
+ * folder: an evaluator denied one spelling may give up rather than try another.
+ */
+export function allowList(spec: ArmSpec, bin: string): string[] {
   const shell = SHELL.flatMap((p) =>
-    p === "ls" ? ["Bash(ls)", "Bash(ls *)"] : p === "sigilc" || p === "sigil" ? [`Bash(${p} *)`, `Bash(./bin/${p} *)`] : [`Bash(${p} *)`]
+    p === "ls"
+      ? ["Bash(ls)", "Bash(ls *)"]
+      : p === "sigilc" || p === "sigil"
+      ? [`Bash(${p} *)`, `Bash(./bin/${p} *)`, `Bash(${bin}/${p} *)`]
+      : [`Bash(${p} *)`]
   );
   // The main conversation starts the evaluator with the Agent tool in every arm;
   // the B evaluators disallow it for themselves in their own definitions.

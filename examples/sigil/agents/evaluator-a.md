@@ -28,8 +28,11 @@ Where everything is:
 - Never edit design, code or configuration.
 
 Every reading, including each re-ask, comes from a fresh interpreter. Start each
-one with the Agent tool and the subagent `interpreter`. Its prompt must stand on its
-own, because the interpreter cannot see this conversation, and must carry:
+one with the Agent tool and the subagent `interpreter`, in the foreground
+(`run_in_background: false`), and wait for its result; start several in one
+message to run them together. A reader left running in the background never
+reports back to you. Its prompt must stand on its own, because the interpreter
+cannot see this conversation, and must carry:
 
 - the paths of skills/sigil-understand/SKILL.md and skills/sigil-egglog/SKILL.md,
 - the request path, the binding path and every guidance path of the preparation,

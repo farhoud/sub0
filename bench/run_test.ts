@@ -7,7 +7,7 @@ import type { Arm } from "./types.ts";
 
 const FAKE = new URL("./testdata/fake-claude.mjs", import.meta.url).pathname;
 
-async function pass(arm: Arm, mode: "report" | "no-report" | "crash", claude = FAKE) {
+async function pass(arm: Arm, mode: "report" | "no-report" | "failed" | "crash", claude = FAKE) {
   const out = Deno.makeTempDirSync({ prefix: "bench-run-" });
   const log = Deno.makeTempDirSync({ prefix: "bench-claude-" });
   const projects = Deno.makeTempDirSync({ prefix: "bench-projects-" });
@@ -63,9 +63,13 @@ Deno.test("a B pass: stages a fresh pass, runs the arm, checks and scores it its
 });
 
 Deno.test("an A pass loads no plugin and keeps the Agent tool for the evaluator", async () => {
-  const { claude, row } = await pass("A", "report");
+  const { claude, row, out } = await pass("A", "report");
   const args: string[] = claude.args;
   ok(!args.includes("--plugin-dir"));
+  // An evaluator denied one spelling of sigilc may stop instead of trying another.
+  for (const rule of ["Bash(sigilc *)", "Bash(./bin/sigilc *)", `Bash(${join(out, "pass", "bin")}/sigilc *)`]) {
+    ok(args.includes(rule), rule);
+  }
   ok(!args.some((a) => a.startsWith("mcp__")));
   const agents = JSON.parse(args[args.indexOf("--agents") + 1]);
   equal(agents["sigil-evaluator"].disallowedTools, undefined);
@@ -107,4 +111,11 @@ Deno.test("a run without the evaluator's report is kept as a failed row, never d
   equal(row.failure, "the run ended without the evaluator's report");
   // The harness's own check still ran and is recorded.
   equal(row.ingestState, "incomplete");
+});
+
+Deno.test("an evaluator that hands back failed makes a failed row", async () => {
+  const { row } = await pass("B", "failed");
+  equal(row.status, "failed");
+  equal(row.handbackState, "failed");
+  equal(row.failure, "the evaluator handed back failed");
 });

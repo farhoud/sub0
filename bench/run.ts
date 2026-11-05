@@ -72,7 +72,7 @@ async function runClaude(options: PassOptions, cwd: string, bin: string, streamF
     "--permission-mode",
     "dontAsk",
     "--allowedTools",
-    ...allowList(spec),
+    ...allowList(spec, bin),
     "--agents",
     JSON.stringify(agentsJson(spec, options.effort)),
     ...(spec.delegates ? ["--plugin-dir", SUBZERO_ROOT] : []),
@@ -168,6 +168,7 @@ export async function measurePass(
   else if (claude.exitCode !== 0) failures.push(`claude -p exited ${claude.exitCode}`);
   if (evaluators.length === 0) failures.push("no evaluator subagent transcript");
   if (handbackState === null) failures.push("the run ended without the evaluator's report");
+  else if (handbackState === "failed") failures.push("the evaluator handed back failed");
 
   const unread = check.result?.unreadUnits;
   const rounds = runs.filter((r) => r.round !== null);
