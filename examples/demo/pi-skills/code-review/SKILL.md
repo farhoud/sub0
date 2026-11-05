@@ -1,12 +1,13 @@
 ---
 name: code-review
-description: Review one source file for bugs and write the findings to the review file the brief names. Use when a brief asks for a code review of a single file.
+description: Review one source file for bugs and reply with the findings, one line each. Use when a brief asks for a code review of a single file.
 ---
 
 # Code review of one file
 
-You review exactly one source file and write one review file. You cannot ask
-questions; work from the brief and the file.
+You review exactly one source file and reply with your findings. Your reply is
+the whole deliverable: whoever asked reads only your final message. You cannot
+ask questions; work from the brief and the file. You change no file.
 
 1. Read the source file named in the brief. Read nothing else unless the file
    imports a local module whose behaviour you must know.
@@ -15,19 +16,13 @@ questions; work from the brief and the file.
    naming and missing comments.
 3. The read tool does not number lines. Find each finding's line number with
    the grep tool on a short exact snippet of that line; grep prints it.
-4. Write the review file the brief names, with the write tool, in exactly this
-   form and nothing else:
+4. Reply with one line per finding, the most serious first, at most 6 lines, and
+   nothing else:
 
-   ```markdown
-   # Review: <source path>
-
-   | Line | Severity | Problem | Fix |
-   | ---: | --- | --- | --- |
-   | 12 | high | One sentence on what goes wrong and when. | One sentence on the change. |
+   ```
+   <severity> L<line>: <what goes wrong and when> — <the fix>
    ```
 
-   - At most 6 rows, the most serious first. Severity is `high`, `medium` or `low`.
+   - Severity is `high`, `medium` or `low`.
    - Line is the line number in the source file.
-   - If you find no defect, write the heading and the line `No defects found.`
-5. Write only that one file. Never change the source file.
-6. Reply with one line per finding: `<severity> L<line>: <problem>`, then stop.
+   - If you find no defect, reply with exactly `No defects found.`

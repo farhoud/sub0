@@ -1,6 +1,6 @@
 ---
 name: review
-description: Review source files for bugs by handing each file to a local pi reviewer agent through subzero, then merge the reviews into one report. Use when the user asks to review code with pi, with the local model, or with subzero reviewers.
+description: Review source files for bugs by handing each file to a local pi reviewer agent through subzero, then merge the reviewers' replies into one report. Use when the user asks to review code with pi, with the local model, or with subzero reviewers.
 argument-hint: "[files or folders, default src/]"
 ---
 
@@ -8,7 +8,9 @@ argument-hint: "[files or folders, default src/]"
 
 Each file is reviewed by a `reviewer` agent: a pi child on a local model,
 running its own `code-review` skill. You orchestrate; the reviewers do the
-reading. Do not read the source files yourself before the reviews are back.
+reading. Each reviewer's findings come back to you as the `summary` of its task
+result, so there are no review files to read. Do not read the source files
+yourself before the results are back.
 
 ## 1. Check the setup
 
@@ -25,7 +27,7 @@ agents:
     model: <provider>/<model>
     thinking: low
     skills: [code-review]
-    tools: [read, grep, find, ls, write]
+    tools: [read, grep, find, ls]
     timeout: 600
 ```
 
@@ -42,8 +44,8 @@ For each file, call `delegate` with:
 - `agent`: `reviewer`
 - `wait`: `false`
 - `files`: `[<file>]`
-- `brief`: `Review <file> using your code-review skill. Write the review to reviews/<file with "/" replaced by "__">.md. Write no other file.`
-- `expected_output`: `One line per finding: severity, line, problem.`
+- `brief`: `Review <file> using your code-review skill.`
+- `expected_output`: `One line per finding: <severity> L<line>: <problem> — <fix>, or "No defects found."`
 
 Start all of them before waiting on any. Tell the user the task ids as they
 start, and that they can watch one with `subzero attach <task id>`.
@@ -57,9 +59,11 @@ each task's status as it arrives.
 
 ## 5. Merge
 
-- Read each review file that exists under `reviews/`.
-- For a task that failed, was cancelled or wrote no review file, note its task
-  id and status; the user can inspect it with `subzero show <task id>`.
+- Take each completed task's findings from the `summary` of its result. Do not
+  look for files: the reviewers write none.
+- For a task that failed, was cancelled, came back truncated or has an empty
+  summary, note its task id and status; the user can inspect it with
+  `subzero show <task id>`.
 - Check each high-severity finding against the source line it cites. Mark a
   finding you disagree with as `disputed` and say why in one sentence.
 - Write `REVIEW.md`: one table with File, Line, Severity, Problem, Verdict
