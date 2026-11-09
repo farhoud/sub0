@@ -4,35 +4,39 @@
 // names them mcp__plugin_subzero_subzero__<tool>.
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { LoadError, TierError, UnknownAgentError, UnresolvedRootError } from '../config/agent-config.js';
+import { LoadError, routableTiers, TierError, UnknownAgentError, UnresolvedRootError } from '../config/agent-config.js';
 import { isTaskId } from '../core/ids.js';
+import { UnsupportedHostError } from '../kernel/kernel.js';
 import { EmptyBriefError, type DelegationService } from '../service/delegation-service.js';
-import { bound, describeReply, formatListing } from './format.js';
+import { bound, describeReply, describeShare, formatListing, sectionShare } from './format.js';
 import { ProgressReporter, type ProgressOptions } from './progress.js';
 
 export const SERVER_INSTRUCTIONS = [
-  'Use the delegate tool to hand a task to a configured subzero agent.',
+  'Use the delegate tool to hand a task to a child on another model, naming an agent, a model tier, both or neither.',
   'Write a self-contained brief: the goal, the relevant file paths, the constraints and the output you expect.',
   'The child cannot see this conversation; it sees only the brief.',
 ].join(' ');
 
 export const MAX_AWAIT_SECONDS = 600;
 
+const DELEGATE_DESCRIPTION =
+  'Delegate a task to a subzero agent running on another model. With no agent it runs the general agent. A tier picks the model the agent runs on. Returns the result with the task id first, or the task id at once when wait is false.';
+
 const TOOLS = [
   {
     name: 'delegate',
-    description:
-      'Delegate a task to a subzero agent running on another model. Returns the result with the task id first, or the task id at once when wait is false.',
+    description: DELEGATE_DESCRIPTION,
     inputSchema: {
       type: 'object',
       properties: {
-        agent: { type: 'string', description: 'Name of an agent in .agents/subzero.yaml' },
+        agent: { type: 'string', description: 'Name of an agent in .agents/subzero.yaml; none runs the general agent' },
+        tier: { type: 'string', description: 'A model tier, medium or tier:medium; the tiers this server can run are listed in the description of this tool' },
         brief: { type: 'string', description: 'A self-contained brief; the child cannot see this conversation' },
         files: { type: 'array', items: { type: 'string' }, description: 'Paths the child should read' },
         expected_output: { type: 'string', description: 'What the result should contain' },
         wait: { type: 'boolean', description: 'Wait for the result (default true)' },
       },
-      required: ['agent', 'brief'],
+      required: ['brief'],
     },
     _meta: { 'anthropic/alwaysLoad': true },
   },
@@ -54,6 +58,7 @@ const TOOLS = [
       required: ['tasks'],
     },
     annotations: { readOnlyHint: true },
+    _meta: { 'anthropic/alwaysLoad': true },
   },
   {
     name: 'cancel',
@@ -74,6 +79,10 @@ function text(body: string, isError = false): CallToolResult {
   return { content: [{ type: 'text', text: bound(body) }], ...(isError ? { isError: true } : {}) };
 }
 
+/** What a caller does when delegate made no task because the tier or its host cannot run. */
+const PASS_BACK =
+  "delegate made no task. Dispatch that subagent through Claude's own Agent tool instead, as a pass-back: call Agent with the same prompt and a short description that begins with passback.";
+
 function toolError(err: unknown): CallToolResult {
   if (err instanceof UnresolvedRootError) {
     return text(
@@ -81,7 +90,8 @@ function toolError(err: unknown): CallToolResult {
       true,
     );
   }
-  if (err instanceof UnknownAgentError || err instanceof TierError || err instanceof LoadError || err instanceof EmptyBriefError) {
+  if (err instanceof TierError || err instanceof UnsupportedHostError) return text(`${err.message}. ${PASS_BACK}`, true);
+  if (err instanceof UnknownAgentError || err instanceof LoadError || err instanceof EmptyBriefError) {
     return text(err.message, true);
   }
   return text(`subzero failed: ${(err as Error)?.message ?? String(err)}`, true);
@@ -98,7 +108,25 @@ export function createSubzeroServer(options: SubzeroServerOptions): Server {
     { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  // The delegate description names the tiers the agent file holds now, read at each listing.
+  async function delegateDescription(): Promise<string> {
+    try {
+      await service.start();
+      const root = service.projectRoot;
+      if (root === undefined) return DELEGATE_DESCRIPTION;
+      const tiers = routableTiers(root, service.supportedHosts());
+      if (tiers.length === 0) return DELEGATE_DESCRIPTION;
+      const list = tiers.map((t) => `${t.tier} → ${t.model} (host ${t.host})`).join('; ');
+      return `${DELEGATE_DESCRIPTION} Tiers you can pass as tier: ${list}.`;
+    } catch {
+      return DELEGATE_DESCRIPTION;
+    }
+  }
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const description = await delegateDescription();
+    return { tools: TOOLS.map((tool) => (tool.name === 'delegate' ? { ...tool, description } : tool)) };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
@@ -107,7 +135,8 @@ export function createSubzeroServer(options: SubzeroServerOptions): Server {
         case 'delegate': {
           const agent = stringArg(args, 'agent');
           const brief = stringArg(args, 'brief');
-          if (agent === undefined || brief === undefined) return text('delegate needs an agent and a brief', true);
+          if (brief === undefined) return text('delegate needs a brief', true);
+          const tier = stringArg(args, 'tier');
           const files = Array.isArray(args.files) ? args.files.filter((f): f is string => typeof f === 'string') : undefined;
           const expectedOutput = stringArg(args, 'expected_output');
           const wait = args.wait !== false;
@@ -119,7 +148,7 @@ export function createSubzeroServer(options: SubzeroServerOptions): Server {
           const reporter =
             wait && progressToken !== undefined
               ? new ProgressReporter(
-                  agent,
+                  agent ?? 'general',
                   (progress, message) =>
                     void extra
                       .sendNotification({ method: 'notifications/progress', params: { progressToken, progress, message } })
@@ -130,7 +159,8 @@ export function createSubzeroServer(options: SubzeroServerOptions): Server {
           try {
             const reply = await service.delegate(
               {
-                agent,
+                ...(agent !== undefined ? { agent } : {}),
+                ...(tier !== undefined ? { tier } : {}),
                 briefText: brief,
                 ...(files !== undefined ? { files } : {}),
                 ...(expectedOutput !== undefined ? { expectedOutput } : {}),
@@ -169,7 +199,9 @@ export function createSubzeroServer(options: SubzeroServerOptions): Server {
           if (ids.length === 0) return text('await needs at least one task id', true);
           const seconds = typeof args.timeout_s === 'number' && args.timeout_s >= 0 ? Math.min(args.timeout_s, MAX_AWAIT_SECONDS) : 30;
           const replies = await Promise.all(ids.map((id) => service.waitFor(id, seconds * 1000)));
-          return text(replies.map((r) => describeReply(r)).join('\n\n'));
+          // Each task gets an equal share of the result limit, so one long result never hides the others.
+          const share = sectionShare(replies.length);
+          return text(replies.map((r) => describeShare(r, share)).join('\n\n'));
         }
 
         case 'cancel': {

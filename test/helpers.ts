@@ -45,6 +45,33 @@ agents:
     timeout: 30
 `;
 
+/**
+ * DEFAULT_YAML plus the tiers medium, large and far (a host with no driver), a
+ * general entry with a full tool list, a read-only fallback entry and a reviewer
+ * with its own override for large.
+ */
+export const TIERED_YAML =
+  DEFAULT_YAML.replace(
+    '    cloud: { host: pi, model: cloud/model, thinking: low }\n',
+    '    cloud: { host: pi, model: cloud/model, thinking: low }\n' +
+      '    medium: { host: pi, model: r9700/Qwen3.8, thinking: medium }\n' +
+      '    large: { host: pi, model: cloud/large, thinking: high }\n' +
+      '    far: { host: claude, model: anthropic/opus, thinking: max }\n',
+  ) +
+  `  general:
+    tools: [read, bash, write, edit]
+    timeout: 9
+  fallback:
+    tools: [read, grep]
+    timeout: 8
+  reviewer:
+    description: A reviewer with its own model for large
+    tiers:
+      large: { model: cloud/reviewer-large }
+    tools: [read]
+    timeout: 7
+`;
+
 /** A project root with .agents/subzero.yaml and the skill folders it names. */
 export function makeProject(yaml = DEFAULT_YAML): string {
   const root = tempDir('subzero-project-');

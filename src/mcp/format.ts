@@ -96,8 +96,37 @@ function replyStatusLine(reply: DelegateReply | CollectReply, now: number): stri
   }
 }
 
+/** Put a notice on the line after the first one, so the task id still comes first. */
+function withNotice(text: string, notice: string | undefined): string {
+  if (notice === undefined) return text;
+  const newline = text.indexOf('\n');
+  const line = `notice: ${notice}`;
+  return newline < 0 ? `${text}\n${line}` : `${text.slice(0, newline)}\n${line}${text.slice(newline)}`;
+}
+
 /** One reply of delegate, tasks, await or cancel about one task, with the task id first. */
 export function describeReply(reply: DelegateReply | CollectReply, view?: { agent: string; createdAt: string }, now = Date.now()): string {
+  return withNotice(describeOne(reply, view, now), 'notice' in reply ? reply.notice : undefined);
+}
+
+/**
+ * One section of an await reply, cut to its share of the tool result limit. A cut
+ * section ends with the way to read the whole result.
+ */
+export function describeShare(reply: CollectReply, share: number, now = Date.now()): string {
+  const full = describeReply(reply, undefined, now);
+  if (full.length <= share) return full;
+  const id = reply.kind === 'result' ? reply.result.taskId : reply.taskId;
+  const pointer = `\n[cut; whole result: tasks(${id})]`;
+  return full.slice(0, Math.max(0, share - pointer.length)) + pointer;
+}
+
+/** The equal share of the tool result limit of each of `count` sections joined by a blank line. */
+export function sectionShare(count: number): number {
+  return Math.floor((TOOL_RESULT_LIMIT - 2 * (count - 1)) / count);
+}
+
+function describeOne(reply: DelegateReply | CollectReply, view: { agent: string; createdAt: string } | undefined, now: number): string {
   if (reply.kind === 'result') return formatResult(reply.result);
   const id = `task: ${reply.taskId}`;
   const lead = view !== undefined ? `${id} · ${view.agent}` : id;

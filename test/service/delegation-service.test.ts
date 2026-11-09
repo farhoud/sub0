@@ -6,7 +6,7 @@ import { unavailableUsage, type ChildPort } from '../../src/core/types.js';
 import { DelegationService, EmptyBriefError, renderBrief } from '../../src/service/delegation-service.js';
 import { TaskStore } from '../../src/store/task-store.js';
 import { Kernel } from '../../src/kernel/kernel.js';
-import { DEFAULT_YAML, FAKE_PI_COMMAND, fakePiEnv, isAlive, kernelWithPort, makeProject, manualPort, piKernel, tempDir, until } from '../helpers.js';
+import { DEFAULT_YAML, FAKE_PI_COMMAND, TIERED_YAML, fakePiEnv, isAlive, kernelWithPort, makeProject, manualPort, piKernel, tempDir, until } from '../helpers.js';
 
 function service(root: string, port: ChildPort) {
   return new DelegationService({
@@ -356,5 +356,131 @@ describe('DelegationService queued and started status', () => {
     dead.createTaskRecord({ taskId: 'sz-qdeadd', agent: { name: 'other' } as never, brief: 'b', endpoint: 'local', createdAt: new Date().toISOString() });
     const svc = service(root, manualPort().port);
     expect(await svc.collect('sz-qdeadd')).toEqual({ kind: 'abandoned', taskId: 'sz-qdeadd' });
+  });
+});
+
+describe('DelegationService tiers, general and fallback', () => {
+  /** A service that records each frozen agent definition and settles nothing by itself. */
+  function recording(root: string) {
+    const frozen: any[] = [];
+    const { port, started } = manualPort();
+    const svc = service(root, { start: (request, onEvent) => (frozen.push(request.agent), port.start(request, onEvent)) });
+    return { svc, frozen, started };
+  }
+
+  it('runs general on the tier model and records general:<tier>, and accepts tier:<tier> the same way', async () => {
+    const root = makeProject(TIERED_YAML);
+    const { svc, frozen } = recording(root);
+    await svc.delegate({ briefText: 'go', tier: 'medium' }, { wait: false });
+    await svc.delegate({ briefText: 'go', tier: 'tier:medium' }, { wait: false });
+    for (const f of frozen) {
+      expect(f).toMatchObject({ name: 'general:medium', host: 'pi', model: 'r9700/Qwen3.8', thinking: 'medium', tools: ['read', 'bash', 'write', 'edit'] });
+    }
+    const agents = (await svc.list()).map((v) => v.agent);
+    expect(agents).toEqual(['general:medium', 'general:medium']);
+  });
+
+  it('covers AE11: no agent and no tier, or the agent general, runs general on its default model and records general', async () => {
+    const { svc, frozen, started } = recording(makeProject(TIERED_YAML));
+    const none = await svc.delegate({ briefText: 'go' }, { wait: false });
+    started[0]!.settle(); // the default endpoint runs one child at a time
+    const named = await svc.delegate({ agent: 'general', briefText: 'go' }, { wait: false });
+    expect(frozen[0]).toMatchObject({ name: 'general', model: 'local/qwen' });
+    expect(frozen[1]).toMatchObject({ name: 'general', model: 'local/qwen' });
+    expect(none).not.toHaveProperty('notice');
+    expect(named).not.toHaveProperty('notice');
+  });
+
+  it('runs a named agent at a tier with its own override, and records <agent>:<tier>', async () => {
+    const { svc, frozen } = recording(makeProject(TIERED_YAML));
+    await svc.delegate({ agent: 'reviewer', briefText: 'go', tier: 'large' }, { wait: false });
+    await svc.delegate({ agent: 'reviewer', briefText: 'go' }, { wait: false });
+    expect(frozen[0]).toMatchObject({ name: 'reviewer:large', model: 'cloud/reviewer-large', thinking: 'high' });
+    expect(frozen[1]).toMatchObject({ name: 'reviewer', model: 'local/qwen' });
+  });
+
+  it('returns the tier error for an unknown tier or a tier host with no driver, and makes no task', async () => {
+    const root = makeProject(TIERED_YAML);
+    const svc = service(root, manualPort().port);
+    const unknown = await svc.delegate({ briefText: 'go', tier: 'huge' }, { wait: false }).catch((e) => e);
+    expect(unknown).toBeInstanceOf(TierError);
+    expect(unknown.message).toMatch(/"huge".*configured tiers: .*medium/s);
+    const far = await svc.delegate({ agent: 'reviewer', briefText: 'go', tier: 'far' }, { wait: false }).catch((e) => e);
+    expect(far).toBeInstanceOf(TierError);
+    expect(far.message).toMatch(/"claude".*supported hosts: pi/s);
+    expect(indexLines(root)).toEqual([]);
+  });
+
+  it('covers AE10: an unknown name runs fallback with its tools, records fallback and carries the notice, waiting or not', async () => {
+    const { svc, frozen, started } = recording(makeProject(TIERED_YAML));
+    const noWait = (await svc.delegate({ agent: 'reviewr', briefText: 'go' }, { wait: false })) as any;
+    expect(frozen[0]).toMatchObject({ name: 'fallback', tools: ['read', 'grep'], timeout: 8 });
+    expect(noWait.notice).toMatch(/reviewr.*not configured/);
+    started[0]!.settle(); // the default endpoint runs one child at a time
+    const waited = svc.delegate({ agent: 'reviewr', briefText: 'go' }, { wait: true });
+    await until(() => started.length === 2);
+    started[1]!.settle();
+    const reply = (await waited) as any;
+    expect(reply).toMatchObject({ kind: 'result', result: { agent: 'fallback' } });
+    expect(reply.notice).toMatch(/reviewr.*not configured/);
+  });
+
+  it('names fallback itself with no notice, and records fallback:<tier> when a tier is named', async () => {
+    const { svc, frozen } = recording(makeProject(TIERED_YAML));
+    const reply = await svc.delegate({ agent: 'fallback', briefText: 'go' }, { wait: false });
+    expect(reply).not.toHaveProperty('notice');
+    expect(frozen[0]).toMatchObject({ name: 'fallback', tools: ['read', 'grep'] });
+    await svc.delegate({ agent: 'reviewr', briefText: 'go', tier: 'medium' }, { wait: false });
+    expect(frozen[1]).toMatchObject({ name: 'fallback:medium', model: 'r9700/Qwen3.8' });
+  });
+
+  it('returns the unknown agent error with no task for an unknown name and no fallback entry', async () => {
+    const root = makeProject(TIERED_YAML.replace(/  fallback:\n    tools: \[read, grep\]\n    timeout: 8\n/, ''));
+    const svc = service(root, manualPort().port);
+    const err = await svc.delegate({ agent: 'reviewr', briefText: 'go' }, { wait: false }).catch((e) => e);
+    expect(err).toBeInstanceOf(UnknownAgentError);
+    expect(err.message).toMatch(/helper, other, free, general, reviewer/);
+    expect(indexLines(root)).toEqual([]);
+  });
+
+  it('never falls back for general or no agent when there is no general entry', async () => {
+    const root = makeProject(DEFAULT_YAML + '  fallback:\n    tools: [read]\n    timeout: 8\n');
+    const svc = service(root, manualPort().port);
+    await expect(svc.delegate({ agent: 'general', briefText: 'go' }, { wait: false })).rejects.toBeInstanceOf(UnknownAgentError);
+    await expect(svc.delegate({ briefText: 'go' }, { wait: false })).rejects.toBeInstanceOf(UnknownAgentError);
+    await expect(svc.delegate({ briefText: 'go', tier: 'small' }, { wait: false })).rejects.toBeInstanceOf(UnknownAgentError);
+    expect(indexLines(root)).toEqual([]);
+  });
+
+  it('keeps the queued scenarios for tiered tasks: the second general:medium task waits at place 1, never started', async () => {
+    const root = makeProject(TIERED_YAML.replace('endpoints:\n', 'endpoints:\n  r9700:\n    parallel: 1\n'));
+    const { svc, started } = recording(root);
+    const first = await svc.delegate({ briefText: 'one', tier: 'medium' }, { wait: false });
+    const second = await svc.delegate({ briefText: 'two', tier: 'medium' }, { wait: false });
+    expect(first).toMatchObject({ kind: 'started' });
+    expect(second).toMatchObject({ kind: 'queued', endpoint: 'r9700', place: 1 });
+    expect(started.length).toBe(1);
+    expect(await svc.list()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ agent: 'general:medium', queuePlace: 1 })]),
+    );
+    started[0]!.settle();
+    await until(() => started.length === 2);
+    expect(await svc.collect((second as any).taskId)).toMatchObject({ kind: 'running' });
+  });
+
+  it('launches a general child on the fake pi with bash, write and edit among its tools and the tier model', async () => {
+    const root = makeProject(TIERED_YAML);
+    const fake = fakePiEnv();
+    const svc = new DelegationService({
+      env: { SUBZERO_PROJECT_DIR: root },
+      warn: () => {},
+      kernel: piKernel({ piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() }).kernel,
+    });
+    const reply = (await svc.delegate({ briefText: 'go', tier: 'medium' }, { wait: true })) as any;
+    expect(reply.result.agent).toBe('general:medium');
+    const argv: string[] = fake.log()[0].argv;
+    expect(argv[argv.indexOf('--model') + 1]).toBe('r9700/Qwen3.8');
+    const tools = argv[argv.indexOf('--tools') + 1]!.split(',');
+    expect(tools).toEqual(expect.arrayContaining(['bash', 'write', 'edit']));
   });
 });

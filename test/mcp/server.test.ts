@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -8,12 +9,12 @@ import { formatListing } from '../../src/mcp/format.js';
 import { createSubzeroServer } from '../../src/mcp/server.js';
 import { DelegationService } from '../../src/service/delegation-service.js';
 import type { TaskView } from '../../src/store/task-store.js';
-import { FAKE_PI, FAKE_PI_COMMAND, fakePiEnv, isAlive, kernelWithPort, makeProject, manualPort, piKernel, tempDir, until } from '../helpers.js';
+import { FAKE_PI, FAKE_PI_COMMAND, TIERED_YAML, fakePiEnv, isAlive, kernelWithPort, makeProject, manualPort, piKernel, tempDir, until } from '../helpers.js';
 
 const REPO = path.resolve(import.meta.dirname, '..', '..');
 
-async function connect(scenario: Record<string, unknown> = {}, env: NodeJS.ProcessEnv | null = null, sessionId?: string) {
-  const root = makeProject();
+async function connect(scenario: Record<string, unknown> = {}, env: NodeJS.ProcessEnv | null = null, sessionId?: string, yaml?: string) {
+  const root = makeProject(yaml);
   const fake = fakePiEnv(scenario);
   const service = new DelegationService({
     env: env ?? { SUBZERO_PROJECT_DIR: root },
@@ -32,8 +33,8 @@ async function connect(scenario: Record<string, unknown> = {}, env: NodeJS.Proce
 }
 
 /** A server whose children the test settles by hand, on an endpoint that runs one at a time. */
-async function connectManual() {
-  const root = makeProject();
+async function connectManual(yaml?: string) {
+  const root = makeProject(yaml);
   const { port, started } = manualPort();
   const service = new DelegationService({ env: { SUBZERO_PROJECT_DIR: root }, roots: () => [], warn: () => {}, kernel: kernelWithPort(port) });
   const server = createSubzeroServer({ service, parentSessionId: () => undefined, progress: { minIntervalMs: 10, heartbeatMs: 200 } });
@@ -48,13 +49,14 @@ async function connectManual() {
 }
 
 describe('McpServer', () => {
-  it('exposes four tools and only delegate is always loaded', async () => {
+  it('exposes four tools and only delegate and await are always loaded', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(['await', 'cancel', 'delegate', 'tasks']);
-    for (const tool of tools) expect(Boolean(tool._meta?.['anthropic/alwaysLoad'])).toBe(tool.name === 'delegate');
+    for (const tool of tools) expect(Boolean(tool._meta?.['anthropic/alwaysLoad'])).toBe(tool.name === 'delegate' || tool.name === 'await');
     expect(client.getInstructions()).toMatch(/self-contained brief/);
     expect(client.getInstructions()).toMatch(/cannot see this conversation/);
+    expect(client.getInstructions()).not.toMatch(/configured/i);
   });
 
   it('sends progress for domain events and heartbeats, without agent text, then returns the result', async () => {
@@ -219,6 +221,185 @@ describe('McpServer', () => {
     expect(lines.at(-1)).toMatch(/^10 tasks were left out; any task can still be read by its task id/);
   });
 });
+
+describe('McpServer tiers, general, fallback and await bounds', () => {
+  const taskIdOf = (text: string) => /sz-[a-z2-7]{6}/.exec(text)![0];
+
+  it('delegate takes an optional agent and a tier, and requires only the brief', async () => {
+    const { client } = await connect({}, null, undefined, TIERED_YAML);
+    const delegate = (await client.listTools()).tools.find((t) => t.name === 'delegate')!;
+    const schema = delegate.inputSchema as any;
+    expect(Object.keys(schema.properties)).toEqual(expect.arrayContaining(['agent', 'tier', 'brief']));
+    expect(schema.required).toEqual(['brief']);
+  });
+
+  it('runs general on the tier model and records general:<tier>, for medium and tier:medium alike', async () => {
+    const { call, textOf, fake } = await connect({}, null, undefined, TIERED_YAML);
+    for (const tier of ['medium', 'tier:medium']) {
+      const text = textOf(await call('delegate', { brief: 'go', tier }));
+      expect(text.split('\n')[0]).toMatch(/^task: sz-[a-z2-7]{6} · general:medium · status: completed/);
+    }
+    const launches = fake.log().filter((l) => l.argv);
+    expect(launches.length).toBe(2);
+    for (const l of launches) {
+      expect(l.argv[l.argv.indexOf('--model') + 1]).toBe('r9700/Qwen3.8');
+      expect(l.argv[l.argv.indexOf('--tools') + 1].split(',')).toEqual(expect.arrayContaining(['bash', 'write', 'edit']));
+    }
+  });
+
+  it('covers AE11: no agent and no tier runs general on its default model and records general', async () => {
+    const { call, textOf, fake } = await connect({}, null, undefined, TIERED_YAML);
+    const text = textOf(await call('delegate', { brief: 'go' }));
+    expect(text.split('\n')[0]).toMatch(/^task: sz-[a-z2-7]{6} · general · status: completed/);
+    const argv = fake.log()[0].argv;
+    expect(argv[argv.indexOf('--model') + 1]).toBe('local/qwen');
+    const named = textOf(await call('delegate', { agent: 'general', brief: 'go' }));
+    expect(named.split('\n')[0]).toMatch(/· general · status: completed/);
+  });
+
+  it('runs a named agent at a tier with its override, and as today without one', async () => {
+    const { call, textOf, fake } = await connect({}, null, undefined, TIERED_YAML);
+    const tiered = textOf(await call('delegate', { agent: 'reviewer', tier: 'large', brief: 'go' }));
+    expect(tiered.split('\n')[0]).toMatch(/· reviewer:large · status: completed/);
+    const plain = textOf(await call('delegate', { agent: 'reviewer', brief: 'go' }));
+    expect(plain.split('\n')[0]).toMatch(/· reviewer · status: completed/);
+    const models = fake.log().filter((l) => l.argv).map((l) => l.argv[l.argv.indexOf('--model') + 1]);
+    expect(models).toEqual(['cloud/reviewer-large', 'local/qwen']);
+  });
+
+  it('returns an unknown tier as a tool error that lists the tiers and points to a pass-back, and launches nothing', async () => {
+    const { call, textOf, fake, service } = await connect({}, null, undefined, TIERED_YAML);
+    const result: any = await call('delegate', { brief: 'go', tier: 'huge' });
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toMatch(/unknown tier "huge"; configured tiers: default, small, cloud, medium, large, far/);
+    expect(text).toMatch(/Agent tool/);
+    expect(text).toMatch(/passback/);
+    expect(fake.log()).toEqual([]);
+    expect(await service.list()).toEqual([]);
+  });
+
+  it('returns a tier whose host has no driver as a tool error naming the host and the supported hosts, and launches nothing', async () => {
+    const { call, textOf, fake, service } = await connect({}, null, undefined, TIERED_YAML);
+    const result: any = await call('delegate', { agent: 'reviewer', brief: 'go', tier: 'far' });
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toMatch(/"claude".*supported hosts: pi/s);
+    expect(text).toMatch(/configured tiers: /);
+    expect(text).toMatch(/Agent tool/);
+    expect(text).toMatch(/passback/);
+    expect(fake.log()).toEqual([]);
+    expect(await service.list()).toEqual([]);
+  });
+
+  it('covers AE10: an unknown name runs fallback with its tools and says it is not configured, waiting or not', async () => {
+    const { call, textOf, fake, service } = await connect({}, null, undefined, TIERED_YAML);
+    const waited = textOf(await call('delegate', { agent: 'reviewr', brief: 'go' }));
+    expect(waited.split('\n')[0]).toMatch(/^task: sz-[a-z2-7]{6} · fallback · status: completed/);
+    expect(waited).toMatch(/reviewr.*not configured/);
+    const noWait = textOf(await call('delegate', { agent: 'reviewr', brief: 'go', wait: false }));
+    expect(noWait).toMatch(/^task: sz-[a-z2-7]{6}/);
+    expect(noWait).toMatch(/reviewr.*not configured/);
+    const argv = fake.log()[0].argv;
+    expect(argv[argv.indexOf('--tools') + 1]).toBe('read,grep');
+    // Naming fallback itself gives no notice.
+    const named = textOf(await call('delegate', { agent: 'fallback', brief: 'go' }));
+    expect(named).toMatch(/· fallback · status: completed/);
+    expect(named).not.toMatch(/not configured/);
+    expect((await service.list()).map((v) => v.agent)).toEqual(['fallback', 'fallback', 'fallback']);
+  });
+
+  it('returns the unknown agent error with no task when there is no fallback entry, and for general with no general entry', async () => {
+    const noFallback = await connect({}, null, undefined, TIERED_YAML.replace(/  fallback:\n    tools: \[read, grep\]\n    timeout: 8\n/, ''));
+    const unknown: any = await noFallback.call('delegate', { agent: 'reviewr', brief: 'go' });
+    expect(unknown.isError).toBe(true);
+    expect(noFallback.textOf(unknown)).toMatch(/unknown agent "reviewr".*general, reviewer/);
+    expect(await noFallback.service.list()).toEqual([]);
+
+    const noGeneral = await connect({}, null, undefined, makeProjectYamlWithoutGeneral());
+    for (const args of [{ agent: 'general', brief: 'go' }, { brief: 'go' }]) {
+      const result: any = await noGeneral.call('delegate', args);
+      expect(result.isError).toBe(true);
+      expect(noGeneral.textOf(result)).toMatch(/configured agents: /);
+    }
+    expect(noGeneral.fake.log()).toEqual([]);
+    expect(await noGeneral.service.list()).toEqual([]);
+  });
+
+  it('keeps queued replies for tiered tasks: the second general:medium task is queued, never started', async () => {
+    const { call, textOf, started } = await connectManual(TIERED_YAML.replace('endpoints:\n', 'endpoints:\n  r9700:\n    parallel: 1\n'));
+    const first = textOf(await call('delegate', { brief: 'one', tier: 'medium', wait: false }));
+    const second = textOf(await call('delegate', { brief: 'two', tier: 'tier:medium', wait: false }));
+    expect(first).toMatch(/running, started/);
+    expect(second).toContain("queued, not launched yet: no child is running; it starts when endpoint r9700 has room (place 1 in this session's queue");
+    expect(second).not.toMatch(/running, started|\bstarted\b/);
+    const listing = textOf(await call('tasks', {}));
+    expect(listing.split('\n').find((l) => l.includes(taskIdOf(second)))).toMatch(/general:medium · queued, not launched yet/);
+    expect(started.length).toBe(1);
+  });
+
+  it('describes delegate from a fresh config read, listing each routable tier with its host and model', async () => {
+    const { client, root } = await connect({}, null, undefined, TIERED_YAML);
+    const description = async () => (await client.listTools()).tools.find((t) => t.name === 'delegate')!.description!;
+    const first = await description();
+    expect(first).toContain('medium → r9700/Qwen3.8');
+    expect(first).toMatch(/large → cloud\/large/);
+    expect(first).toMatch(/medium → r9700\/Qwen3.8 \(host pi\)/);
+    // The tier whose host has no driver is not routable.
+    expect(first).not.toMatch(/far →/);
+    writeFileSync(
+      path.join(root, '.agents', 'subzero.yaml'),
+      TIERED_YAML.replace('medium: { host: pi, model: r9700/Qwen3.8, thinking: medium }', 'medium: { host: pi, model: gpu/Other-9, thinking: medium }'),
+    );
+    const second = await description();
+    expect(second).toContain('medium → gpu/Other-9');
+    expect(second).not.toContain('r9700/Qwen3.8');
+  });
+
+  it('lists the tools with the static description when the config is broken, or has no general entry', async () => {
+    const { client, root } = await connect({}, null, undefined, TIERED_YAML);
+    const staticText = async () => {
+      const { tools } = await client.listTools();
+      expect(tools.map((t) => t.name).sort()).toEqual(['await', 'cancel', 'delegate', 'tasks']);
+      return tools.find((t) => t.name === 'delegate')!.description!;
+    };
+    writeFileSync(path.join(root, '.agents', 'subzero.yaml'), 'agents: [');
+    const broken = await staticText();
+    expect(broken).toMatch(/Delegate a task to a subzero agent/);
+    expect(broken).not.toMatch(/→/);
+    writeFileSync(path.join(root, '.agents', 'subzero.yaml'), makeProjectYamlWithoutGeneral());
+    expect(await staticText()).toBe(broken);
+  });
+
+  it('covers F1: await over six finished tasks returns every section, and each cut one ends with the tasks pointer', async () => {
+    const { call, textOf } = await connect({ lastText: 'FINDING-'.repeat(1000) }, null, undefined, TIERED_YAML);
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) ids.push(taskIdOf(textOf(await call('delegate', { agent: 'free', brief: `go ${i}`, wait: false }))));
+    const joined = textOf(await call('await', { tasks: ids, timeout_s: 20 }));
+    expect(joined.length).toBeLessThanOrEqual(12_000);
+    const sections = joined.split('\n\n');
+    expect(sections.length).toBe(6);
+    for (const id of ids) {
+      const section = sections.find((s) => s.startsWith(`task: ${id}`));
+      expect(section, id).toBeDefined();
+      expect(section).toMatch(/status: completed/);
+      expect(section!.trimEnd().endsWith(`tasks(${id})`) || section!.trimEnd().endsWith(`tasks(${id})]`)).toBe(true);
+    }
+  });
+
+  it('returns a short result whole in an await, with no pointer', async () => {
+    const { call, textOf } = await connect({ lastText: 'short result' }, null, undefined, TIERED_YAML);
+    const a = taskIdOf(textOf(await call('delegate', { agent: 'free', brief: 'a', wait: false })));
+    const b = taskIdOf(textOf(await call('delegate', { agent: 'free', brief: 'b', wait: false })));
+    const joined = textOf(await call('await', { tasks: [a, b], timeout_s: 20 }));
+    expect(joined).not.toMatch(/tasks\(/);
+    expect(joined.match(/short result/g)!.length).toBe(2);
+  });
+});
+
+function makeProjectYamlWithoutGeneral(): string {
+  return TIERED_YAML.replace(/  general:\n    tools: \[read, bash, write, edit\]\n    timeout: 9\n/, '');
+}
 
 describe('McpServer process', () => {
   beforeAll(() => {

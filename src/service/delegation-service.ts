@@ -5,8 +5,12 @@
 // the host of an agent definition and hands it to TaskCore, and owns the live task
 // registry and the per-endpoint parallel limit. It names no host or child driver.
 import {
-  getAgent,
+  FALLBACK_AGENT,
+  GENERAL_AGENT,
+  loadAgentFile,
+  resolveAgent,
   resolveProjectRoot,
+  UnknownAgentError,
   UnresolvedRootError,
   type AgentDefinition,
   type RootSources,
@@ -20,6 +24,8 @@ import { TaskStore, type TaskStoreOptions, type TaskView } from '../store/task-s
 export interface Delegation {
   /** The agent entry to run; none runs `general`. */
   agent?: string;
+  /** The model tier to run it on, `medium` or `tier:medium`; none runs the agent's own tier or `default`. */
+  tier?: string;
   briefText: string;
   files?: string[];
   expectedOutput?: string;
@@ -57,10 +63,14 @@ export interface QueuedStatus {
   enqueuedAt: string;
 }
 
-export type DelegateReply =
+export type DelegateReply = (
   | { kind: 'result'; result: Result }
   | { kind: 'started'; taskId: string; startedAt: string }
-  | ({ kind: 'queued' } & QueuedStatus);
+  | ({ kind: 'queued' } & QueuedStatus)
+) & {
+  /** Set when the named agent is not configured and the fallback agent ran instead. */
+  notice?: string;
+};
 
 export type CollectReply =
   | { kind: 'result'; result: Result }
@@ -173,6 +183,11 @@ export class DelegationService {
     return this.connected?.projectRoot;
   }
 
+  /** The hosts the Kernel registry runs a child on, for front ends that hand them to AgentConfig. */
+  supportedHosts(): string[] {
+    return this.options.kernel.supportedHosts();
+  }
+
   /** The task store, for front ends that read task records. Requires start(). */
   get store(): TaskStore {
     if (this.connected === null) throw new Error('the delegation service has not started');
@@ -212,9 +227,7 @@ export class DelegationService {
     const { projectRoot, core } = await this.connect();
     if (delegation.briefText.trim() === '') throw new EmptyBriefError();
     // The host of the definition comes from its tier; the registry's hosts are the only ones that run.
-    const agent: AgentDefinition = getAgent(projectRoot, delegation.agent, {
-      supportedHosts: this.options.kernel.supportedHosts(),
-    });
+    const { agent, notice } = this.chooseAgent(projectRoot, delegation);
     const port = this.options.kernel.childPort(agent.host);
 
     const task = core.start({
@@ -237,8 +250,30 @@ export class DelegationService {
     // Only a run the limiter kept back is reported as Pending.
     if (task.state === 'Pending') options.onState?.('Pending');
 
-    if (!options.wait) return this.liveReply(task);
-    return { kind: 'result', result: await task.result };
+    const withNotice = <T extends DelegateReply>(reply: T): T => (notice !== undefined ? { ...reply, notice } : reply);
+    if (!options.wait) return withNotice(this.liveReply(task));
+    return withNotice({ kind: 'result', result: await task.result });
+  }
+
+  /**
+   * The agent entry a delegation runs, resolved at its tier: the one named, `general`
+   * for none or for `general`, or `fallback` for a name the agents map does not hold
+   * (with a notice that says so). `general` never falls back.
+   */
+  private chooseAgent(projectRoot: string, delegation: Delegation): { agent: AgentDefinition; notice?: string } {
+    const catalog = loadAgentFile(projectRoot);
+    const supportedHosts = this.options.kernel.supportedHosts();
+    const tier = delegation.tier?.trim().replace(/^tier:/, '').trim();
+    const options = { supportedHosts, ...(tier !== undefined && tier !== '' ? { tier } : {}) };
+    const named = delegation.agent;
+    if (named === undefined || named === GENERAL_AGENT || catalog.entries.has(named)) {
+      return { agent: resolveAgent(catalog, named, options) };
+    }
+    if (!catalog.entries.has(FALLBACK_AGENT)) throw new UnknownAgentError(named, [...catalog.entries.keys()]);
+    return {
+      agent: resolveAgent(catalog, FALLBACK_AGENT, options),
+      notice: `the agent "${named}" is not configured, so the ${FALLBACK_AGENT} agent ran instead; configured agents: ${[...catalog.entries.keys()].join(', ')}`,
+    };
   }
 
   /** The reply of a live task that has no result: its start time, or its place in line while Pending. */
