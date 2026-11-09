@@ -67,7 +67,8 @@ component McpServer {
     ```
 
     The *plugin data folder* is the folder that Claude Code gives the plugin for
-    its own files. It holds the recorded parent session id of each session of each project.
+    its own files. It holds the recorded parent session id of each session of
+    each project.
   }
 
   logic {
