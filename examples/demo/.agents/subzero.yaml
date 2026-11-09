@@ -14,8 +14,24 @@ models:
       host: pi
       model: r9700/Qwen3.8
       thinking: low
+    # CE's "mid-tier" dispatches (tiered-subagent-routing) run on this tier.
+    medium:
+      host: pi
+      model: r9700/Qwen3.8
+      thinking: medium
 
 agents:
+  # Take unnamed and tiered work, such as CE's generic subagents. No description:
+  # they are never chosen by description. Full tools: CE reviewers write findings
+  # files and run read-only git, and pi has no path sandbox (run from a demo copy).
+  general:
+    tools: [read, bash, edit, write, grep, find, ls]
+    timeout: 1200
+  # Runs a delegation that names an agent this file does not hold; read-only.
+  fallback:
+    tools: [read, grep, find, ls]
+    timeout: 1200
+
   reviewer:
     description: Reviews one source file for bugs and replies with the findings, one line each.
     skills: [code-review]

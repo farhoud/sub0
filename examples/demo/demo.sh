@@ -3,6 +3,7 @@
 #
 #   ./demo.sh setup [dir]   copy the demo to dir (default ~/subzero-demo); run every other command there
 #   ./demo.sh               open Claude Code here with the subzero plugin; then type /subzero:review
+#   ./demo.sh ce            the same with the compound-engineering plugin too; then type the /ce-code-review line it prints
 #   ./demo.sh tasks         list the subzero tasks of this folder
 #   ./demo.sh attach <id>   follow one pi reviewer live
 #   ./demo.sh show <id>     export one pi reviewer's session to <id>.html
@@ -24,6 +25,13 @@ case "${1:-claude}" in
     cp -R src pi-skills .claude .gitignore README.md demo.sh "$dest/"
     cp .agents/subzero.yaml "$dest/.agents/"
     echo "$SUBZERO_ROOT" > "$dest/.subzero-root"
+    # CE reviews a git diff and stops when no base resolves: an empty baseline commit, then one that adds src/.
+    if [ ! -d "$dest/.git" ]; then
+      git -C "$dest" init -q
+      git -C "$dest" -c user.name=demo -c user.email=demo@example.invalid commit -q --allow-empty -m baseline
+      git -C "$dest" add src
+      git -C "$dest" -c user.name=demo -c user.email=demo@example.invalid commit -q -m "add src"
+    fi
     echo "demo copied to $dest; cd there and run ./demo.sh" ;;
   claude)
     # Claude Code refuses to write files inside a folder loaded with --plugin-dir,
@@ -35,6 +43,16 @@ case "${1:-claude}" in
     # .claude/settings.json, which Claude Code applies once the folder is trusted.
     exec claude --setting-sources project,local --plugin-dir "$SUBZERO_ROOT" \
       --allowedTools 'mcp__plugin_subzero_subzero__*' 'Edit(REVIEW.md)' ;;
+  ce)
+    # Needs the compound-engineering plugin: CE_PLUGIN_DIR, or the newest copy in the plugin cache.
+    CE_PLUGIN_DIR="${CE_PLUGIN_DIR:-$(ls -d "$HOME"/.claude/plugins/cache/compound-engineering-plugin/compound-engineering/*/ 2>/dev/null | sort -V | tail -1)}"
+    [ -f "${CE_PLUGIN_DIR:-/nonexistent}/plugin.json" ] || { echo "set CE_PLUGIN_DIR to the compound-engineering plugin folder" >&2; exit 1; }
+    case "$DEMO/" in "$SUBZERO_ROOT"/*)
+      echo "run the demo from a copy outside the subzero repository: ./demo.sh setup [dir]" >&2; exit 1 ;;
+    esac
+    base="$(git rev-list --max-parents=0 HEAD | head -1)"
+    echo "inside Claude Code type:  /ce-code-review base:$base depth:full" >&2
+    exec claude --setting-sources project,local --plugin-dir "$SUBZERO_ROOT" --plugin-dir "$CE_PLUGIN_DIR" ;;
   tasks) subzero tasks ;;
   attach) subzero attach "$2" ;;
   show) subzero show "$2" ;;

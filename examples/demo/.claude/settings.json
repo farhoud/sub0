@@ -5,7 +5,22 @@
       "Read",
       "Glob",
       "Grep",
-      "Edit(REVIEW.md)"
+      "Agent",
+      "Skill",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git status:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git merge-base:*)",
+      "Bash(git ls-files:*)",
+      "Edit(REVIEW.md)",
+      "Write(//tmp/compound-engineering-*/**)",
+      "Edit(//tmp/compound-engineering-*/**)",
+      "Write(//private/var/folders/**/compound-engineering-*/**)",
+      "Edit(//private/var/folders/**/compound-engineering-*/**)",
+      "Bash(mkdir:*)",
+      "Bash(python3:*)"
     ]
   }
 }
