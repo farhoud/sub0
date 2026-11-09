@@ -2,27 +2,11 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { LoadError, TierError, UnknownAgentError, UnresolvedRootError } from '../../src/config/agent-config.js';
-import { unavailableUsage, type ChildOutcome, type ChildPort } from '../../src/core/types.js';
+import { unavailableUsage, type ChildPort } from '../../src/core/types.js';
 import { DelegationService, EmptyBriefError, renderBrief } from '../../src/service/delegation-service.js';
 import { TaskStore } from '../../src/store/task-store.js';
 import { Kernel } from '../../src/kernel/kernel.js';
-import { DEFAULT_YAML, FAKE_PI_COMMAND, fakePiEnv, isAlive, kernelWithPort, makeProject, piKernel, tempDir, until } from '../helpers.js';
-
-/** A child port that the test settles by hand, recording each start. */
-function manualPort() {
-  const started: { taskId: string; settle: (o?: Partial<ChildOutcome>) => void }[] = [];
-  const port: ChildPort = {
-    start(request) {
-      let resolve!: (o: ChildOutcome) => void;
-      const outcome = new Promise<ChildOutcome>((r) => (resolve = r));
-      const settle = (o: Partial<ChildOutcome> = {}) =>
-        resolve({ lastAssistantText: 'ok', status: 'completed', usage: unavailableUsage('n/a'), ...o });
-      started.push({ taskId: request.taskId, settle });
-      return { outcome, cancel: () => settle({ status: 'cancelled' }) };
-    },
-  };
-  return { port, started };
-}
+import { DEFAULT_YAML, FAKE_PI_COMMAND, fakePiEnv, isAlive, kernelWithPort, makeProject, manualPort, piKernel, tempDir, until } from '../helpers.js';
 
 function service(root: string, port: ChildPort) {
   return new DelegationService({
@@ -174,8 +158,8 @@ describe('DelegationService', () => {
     const { taskId } = (await owner.delegate({ agent: 'free', briefText: 'b' }, { wait: false })) as { taskId: string };
     const here = service(root, manualPort().port);
     const before = indexLines(root).length;
-    expect(await here.cancel(taskId)).toEqual({ kind: 'other_process', taskId });
-    expect(await here.collect(taskId)).toEqual({ kind: 'other_process', taskId });
+    expect(await here.cancel(taskId)).toMatchObject({ kind: 'other_process', taskId });
+    expect(await here.collect(taskId)).toMatchObject({ kind: 'other_process', taskId, endpoint: 'cloud' });
     expect(indexLines(root).length).toBe(before);
     expect(here.store.readTask(taskId)!.status).toBe('running');
   });
@@ -269,5 +253,108 @@ describe('DelegationService', () => {
     expect(err).toBeInstanceOf(TierError);
     expect(err.message).toMatch(/"cloud".*"claude".*supported hosts: pi/s);
     expect(indexLines(root)).toEqual([]);
+  });
+
+});
+
+describe('DelegationService queued and started status', () => {
+  const idOf = (reply: { taskId?: string }) => reply.taskId!;
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('answers started for the first of three no-wait delegations and queued at places 1 and 2 for the others', async () => {
+    const { port, started } = manualPort();
+    const svc = service(makeProject(), port);
+    const first = await svc.delegate({ agent: 'helper', briefText: 'one' }, { wait: false });
+    const second = await svc.delegate({ agent: 'other', briefText: 'two' }, { wait: false });
+    const third = await svc.delegate({ agent: 'other', briefText: 'three' }, { wait: false });
+    expect(first).toMatchObject({ kind: 'started', startedAt: expect.any(String) });
+    expect(second).toMatchObject({ kind: 'queued', endpoint: 'local', place: 1, enqueuedAt: expect.any(String) });
+    expect(third).toMatchObject({ kind: 'queued', endpoint: 'local', place: 2 });
+    expect(started.length).toBe(1);
+    // A queued reply never carries a start time.
+    expect(second).not.toHaveProperty('startedAt');
+  });
+
+  it('reports the next task running with a start time later than its enqueue time once the running one settles', async () => {
+    const { port, started } = manualPort();
+    const svc = service(makeProject(), port);
+    await svc.delegate({ agent: 'helper', briefText: 'one' }, { wait: false });
+    const second = (await svc.delegate({ agent: 'other', briefText: 'two' }, { wait: false })) as any;
+    await pause(30);
+    expect(await svc.collect(second.taskId)).toMatchObject({ kind: 'queued', place: 1 });
+    started[0]!.settle();
+    await until(() => started.length === 2);
+    const running = (await svc.collect(second.taskId)) as any;
+    expect(running.kind).toBe('running');
+    expect(Date.parse(running.startedAt)).toBeGreaterThan(Date.parse(second.enqueuedAt));
+    expect(running).not.toHaveProperty('place');
+  });
+
+  it('lists a queued task with its place and a released one with its start time', async () => {
+    const { port } = manualPort();
+    const svc = service(makeProject(), port);
+    await svc.delegate({ agent: 'helper', briefText: 'one' }, { wait: false });
+    await svc.delegate({ agent: 'other', briefText: 'two' }, { wait: false });
+    const views = await svc.list();
+    const byAgent = new Map(views.map((v) => [v.agent, v]));
+    expect(byAgent.get('helper')).toMatchObject({ status: 'running', startedAt: expect.any(String) });
+    expect(byAgent.get('helper')!.queuePlace).toBeUndefined();
+    expect(byAgent.get('other')).toMatchObject({ status: 'running', queuePlace: 1, endpoint: 'local' });
+    expect(byAgent.get('other')!.startedAt).toBeUndefined();
+  });
+
+  it('removes a cancelled queued task from the queue and moves the next one to place 1', async () => {
+    const { port, started } = manualPort();
+    const svc = service(makeProject(), port);
+    await svc.delegate({ agent: 'helper', briefText: 'one' }, { wait: false });
+    const second = await svc.delegate({ agent: 'other', briefText: 'two' }, { wait: false });
+    const third = await svc.delegate({ agent: 'other', briefText: 'three' }, { wait: false });
+    expect(await svc.cancel(idOf(second as any))).toMatchObject({ kind: 'result', result: { status: 'cancelled' } });
+    expect(await svc.collect(idOf(third as any))).toMatchObject({ kind: 'queued', place: 1 });
+    expect(started.length).toBe(1);
+  });
+
+  it('starts the timeout of a queued task at its release, so a task queued longer than its timeout still runs', async () => {
+    const yaml = DEFAULT_YAML.replace('    tier: small\n    skills: [alpha]\n    tools: [read]\n    timeout: 30', '    tier: small\n    skills: [alpha]\n    tools: [read]\n    timeout: 0.8');
+    const root = makeProject(yaml);
+    const fake = fakePiEnv();
+    const pi = piKernel({ piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() }).kernel.childPort('pi');
+    // The first start is held by hand; later ones run on the fake pi, whose child lives far shorter than the timeout.
+    const manual = manualPort();
+    let starts = 0;
+    const kernel = kernelWithPort({ start: (request, onEvent) => (starts++ === 0 ? manual.port.start(request, onEvent) : pi.start(request, onEvent)) });
+    const svc = new DelegationService({ env: { SUBZERO_PROJECT_DIR: root }, warn: () => {}, kernel });
+    await svc.delegate({ agent: 'helper', briefText: 'holds the endpoint' }, { wait: false });
+    const waiting = svc.delegate({ agent: 'other', briefText: 'queued' }, { wait: true });
+    await pause(1200); // longer than the 0.8 s timeout of the queued agent
+    manual.started[0]!.settle();
+    expect(await waiting).toMatchObject({ kind: 'result', result: { status: 'completed', summary: 'Done: wrote the answer.' } });
+  });
+
+  it('persists the start time at release so a second process sees it, and shows a task still queued elsewhere as queued with no place', async () => {
+    const root = makeProject();
+    const { port } = manualPort();
+    const owner = service(root, port);
+    const first = (await owner.delegate({ agent: 'helper', briefText: 'one' }, { wait: false })) as any;
+    const second = (await owner.delegate({ agent: 'other', briefText: 'two' }, { wait: false })) as any;
+    const here = service(root, manualPort().port);
+    const firstReply = (await here.collect(first.taskId)) as any;
+    expect(firstReply).toMatchObject({ kind: 'other_process', endpoint: 'local', startedAt: first.startedAt });
+    const secondReply = (await here.collect(second.taskId)) as any;
+    expect(secondReply).toMatchObject({ kind: 'other_process', endpoint: 'local', enqueuedAt: second.enqueuedAt });
+    expect(secondReply.startedAt).toBeUndefined();
+    const views = new Map((await here.list()).map((v) => [v.taskId, v]));
+    expect(views.get(first.taskId)).toMatchObject({ status: 'running', startedAt: first.startedAt });
+    expect(views.get(second.taskId)).toMatchObject({ status: 'running' });
+    expect(views.get(second.taskId)!.startedAt).toBeUndefined();
+    expect(views.get(second.taskId)!.queuePlace).toBeUndefined();
+  });
+
+  it('marks the queued task of a dead process abandoned, because its stored status is running', async () => {
+    const root = makeProject();
+    const dead = new TaskStore(root, { owner: { pid: 999_999, startTime: 'then' } });
+    dead.createTaskRecord({ taskId: 'sz-qdeadd', agent: { name: 'other' } as never, brief: 'b', endpoint: 'local', createdAt: new Date().toISOString() });
+    const svc = service(root, manualPort().port);
+    expect(await svc.collect('sz-qdeadd')).toEqual({ kind: 'abandoned', taskId: 'sz-qdeadd' });
   });
 });

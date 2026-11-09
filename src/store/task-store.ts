@@ -3,7 +3,7 @@
 // Layout under <project root>/.agents/subzero/:
 //   .gitignore            ignores everything in the store folder
 //   index.jsonl           append-only; the latest line per task wins
-//   tasks/<id>/task.json  frozen agent definition, brief and, once started, the launch spec
+//   tasks/<id>/task.json  frozen agent definition, brief, endpoint, start time and, once started, the launch spec
 //   tasks/<id>/events.jsonl
 //   tasks/<id>/turns/1.json  the exact result the parent received
 //   tasks/<id>/            also holds the driver files of the task, which the store never writes
@@ -41,6 +41,8 @@ export interface IndexLine {
   sessionFile?: string;
   createdAt: string;
   updatedAt: string;
+  /** The model endpoint of the task. Written on the first line of a task only. */
+  endpoint?: string;
   /** Written on the first line of a task only. */
   owner?: OwnerProcess;
 }
@@ -50,7 +52,12 @@ export interface TaskJson {
   agent: AgentDefinition;
   brief: string;
   parentSessionId?: string;
+  /** The model endpoint of the task, kept from its first write and never read from the launch spec. */
+  endpoint?: string;
+  /** The enqueue time of the task: the time it was created. */
   createdAt: string;
+  /** When the caller released its child run, written at the release and never read from the launch spec. */
+  startedAt?: string;
   launchSpec?: LaunchSpec;
 }
 
@@ -60,8 +67,13 @@ export interface TaskView {
   agent: string;
   status: TaskStatus;
   parentSessionId?: string;
+  /** The enqueue time of the task: the time it was created. */
   createdAt: string;
   updatedAt: string;
+  /** The model endpoint of the task, when its first write recorded one. */
+  endpoint?: string;
+  /** When its child run was released; none while the task is queued. */
+  startedAt?: string;
   sessionFile?: string;
   owner?: OwnerProcess;
 }
@@ -123,6 +135,8 @@ export interface TaskRecordWriter {
   /** The folder where the child driver keeps its own files of a task. */
   driverFilesFolder(taskId: string): string;
   createTaskRecord(task: TaskJson): void;
+  /** Record when the child run of a task was released, for a reader in any process. */
+  writeStartTime(taskId: string, startedAt: string): void;
   writeLaunchSpec(taskId: string, spec: LaunchSpec): void;
   appendEvent(taskId: string, event: DomainEvent): void;
   writeResult(taskId: string, result: Result, extra?: { sessionFile?: string }): void;
@@ -192,8 +206,17 @@ export class TaskStore implements TaskRecordWriter {
       childSession: task.taskId,
       createdAt: task.createdAt,
       updatedAt: task.createdAt,
+      ...(task.endpoint !== undefined ? { endpoint: task.endpoint } : {}),
       owner: this.owner,
     });
+  }
+
+  /** Write the start time into the task record: no index line, so the task status is still running. */
+  writeStartTime(taskId: string, startedAt: string): void {
+    const file = path.join(this.taskDir(taskId), 'task.json');
+    const task = readJson<TaskJson>(file);
+    if (task === null) throw new Error(`no task record for ${taskId}`);
+    writeAtomic(file, { ...task, startedAt });
   }
 
   writeLaunchSpec(taskId: string, spec: LaunchSpec): void {
@@ -259,6 +282,7 @@ export class TaskStore implements TaskRecordWriter {
         createdAt: earlier?.createdAt ?? line.createdAt,
         parentSessionId: line.parentSessionId ?? earlier?.parentSessionId,
         sessionFile: line.sessionFile ?? earlier?.sessionFile,
+        endpoint: line.endpoint ?? earlier?.endpoint,
       });
     });
     return latest;
@@ -273,7 +297,7 @@ export class TaskStore implements TaskRecordWriter {
   }
 
   /** A stored result outranks whatever the latest index line says. */
-  private view(line: IndexLine, result: Result | null): TaskView {
+  private view(line: IndexLine, result: Result | null, task: TaskJson | null = null): TaskView {
     return {
       taskId: line.taskId,
       agent: line.agent,
@@ -281,6 +305,8 @@ export class TaskStore implements TaskRecordWriter {
       ...(line.parentSessionId !== undefined ? { parentSessionId: line.parentSessionId } : {}),
       createdAt: line.createdAt,
       updatedAt: line.updatedAt,
+      ...(line.endpoint !== undefined ? { endpoint: line.endpoint } : {}),
+      ...(task?.startedAt !== undefined ? { startedAt: task.startedAt } : {}),
       ...(line.sessionFile !== undefined ? { sessionFile: line.sessionFile } : {}),
       ...(line.owner !== undefined ? { owner: line.owner } : {}),
     };
@@ -290,9 +316,10 @@ export class TaskStore implements TaskRecordWriter {
     const line = this.readLatest().get(taskId);
     if (line === undefined) return null;
     const result = this.readResult(taskId);
-    const view = this.view(line, result);
+    const task = this.readTaskJson(taskId);
+    const view = this.view(line, result, task);
     const sessionFile = view.sessionFile ?? this.findSessionFile(taskId);
-    return { ...view, ...(sessionFile !== undefined ? { sessionFile } : {}), task: this.readTaskJson(taskId), result };
+    return { ...view, ...(sessionFile !== undefined ? { sessionFile } : {}), task, result };
   }
 
   /** The child session file of a task in the sessions folder; its id is the task id. */
@@ -310,7 +337,9 @@ export class TaskStore implements TaskRecordWriter {
     const views: TaskView[] = [];
     for (const line of this.readLatest().values()) {
       if (parentSessionId !== undefined && line.parentSessionId !== parentSessionId) continue;
-      views.push(this.view(line, line.status === 'running' || line.status === 'abandoned' ? this.readResult(line.taskId) : null));
+      const open = line.status === 'running' || line.status === 'abandoned';
+      // The start time lives in the task record; only a task with no result can still be queued.
+      views.push(this.view(line, open ? this.readResult(line.taskId) : null, line.status === 'running' ? this.readTaskJson(line.taskId) : null));
     }
     return views;
   }

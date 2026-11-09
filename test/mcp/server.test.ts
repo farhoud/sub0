@@ -8,7 +8,7 @@ import { formatListing } from '../../src/mcp/format.js';
 import { createSubzeroServer } from '../../src/mcp/server.js';
 import { DelegationService } from '../../src/service/delegation-service.js';
 import type { TaskView } from '../../src/store/task-store.js';
-import { FAKE_PI, FAKE_PI_COMMAND, fakePiEnv, isAlive, makeProject, piKernel, tempDir, until } from '../helpers.js';
+import { FAKE_PI, FAKE_PI_COMMAND, fakePiEnv, isAlive, kernelWithPort, makeProject, manualPort, piKernel, tempDir, until } from '../helpers.js';
 
 const REPO = path.resolve(import.meta.dirname, '..', '..');
 
@@ -29,6 +29,22 @@ async function connect(scenario: Record<string, unknown> = {}, env: NodeJS.Proce
     client.callTool({ name, arguments: args }, CallToolResultSchema, options);
   const textOf = (r: any) => r.content.map((c: any) => c.text).join('\n') as string;
   return { root, fake, service, client, call, textOf };
+}
+
+/** A server whose children the test settles by hand, on an endpoint that runs one at a time. */
+async function connectManual() {
+  const root = makeProject();
+  const { port, started } = manualPort();
+  const service = new DelegationService({ env: { SUBZERO_PROJECT_DIR: root }, roots: () => [], warn: () => {}, kernel: kernelWithPort(port) });
+  const server = createSubzeroServer({ service, parentSessionId: () => undefined, progress: { minIntervalMs: 10, heartbeatMs: 200 } });
+  const client = new Client({ name: 'test', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(a), client.connect(b)]);
+  const call = (name: string, args: Record<string, unknown>, options: Parameters<Client['callTool']>[2] = {}) =>
+    client.callTool({ name, arguments: args }, CallToolResultSchema, options);
+  const textOf = (r: any) => r.content.map((c: any) => c.text).join('\n') as string;
+  const idIn = (text: string) => /sz-[a-z2-7]{6}/.exec(text)![0];
+  return { root, service, started, call, textOf, idIn };
 }
 
 describe('McpServer', () => {
@@ -64,7 +80,8 @@ describe('McpServer', () => {
     const { call, textOf } = await connect({ turn: [{ sleep: 800 }, { emit: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'x' }], stopReason: 'stop' } } }, { emit: { type: 'agent_settled' } }] });
     const started = textOf(await call('delegate', { agent: 'helper', brief: 'go', wait: false }));
     const taskId = /sz-[a-z2-7]{6}/.exec(started)![0];
-    expect(textOf(await call('await', { tasks: [taskId], timeout_s: 0.05 }))).toContain('still running');
+    expect(started).toMatch(/running, started \d{4}-\d{2}-\d{2}T[\d:.]+Z \(\d+s ago\)/);
+    expect(textOf(await call('await', { tasks: [taskId], timeout_s: 0.05 }))).toMatch(/running, started \d{4}-/);
     expect(textOf(await call('await', { tasks: [taskId], timeout_s: 10 }))).toMatch(/status: completed/);
   });
 
@@ -109,18 +126,96 @@ describe('McpServer', () => {
     expect(unknown.textOf(await unknown.call('tasks', {}))).toMatch(/could not identify this conversation/);
   });
 
+  it('replies started to the first of three no-wait delegates and queued at places 1 and 2 to the others', async () => {
+    const { call, textOf, started } = await connectManual();
+    const first = textOf(await call('delegate', { agent: 'helper', brief: 'one', wait: false }));
+    const second = textOf(await call('delegate', { agent: 'other', brief: 'two', wait: false }));
+    const third = textOf(await call('delegate', { agent: 'other', brief: 'three', wait: false }));
+    expect(first).toMatch(/^task: sz-[a-z2-7]{6} · running, started \d{4}-[\d\-T:.Z]+ \(\d+s ago\)/);
+    expect(second).toContain("queued, not launched yet: no child is running; it starts when endpoint local has room (place 1 in this session's queue, waiting ");
+    expect(third).toContain("place 2 in this session's queue");
+    for (const reply of [second, third]) expect(reply).not.toMatch(/running, started|still running|\bstarted\b/);
+    expect(started.length).toBe(1);
+  });
+
+  it('shows queued with its place and wait in tasks(task), never running, and moves the place when the first one is cancelled', async () => {
+    const { call, textOf, idIn } = await connectManual();
+    await call('delegate', { agent: 'helper', brief: 'one', wait: false });
+    const second = idIn(textOf(await call('delegate', { agent: 'other', brief: 'two', wait: false })));
+    const third = idIn(textOf(await call('delegate', { agent: 'other', brief: 'three', wait: false })));
+    const shown = textOf(await call('tasks', { task: third }));
+    expect(shown).toMatch(/queued, not launched yet: .* \(place 2 in this session's queue, waiting \d+s\)/);
+    expect(shown).not.toMatch(/running, started|still running|\bstarted\b/);
+    expect(textOf(await call('cancel', { task: second }))).toMatch(/cancelled/);
+    expect(textOf(await call('tasks', { task: third }))).toContain("place 1 in this session's queue");
+    const listing = textOf(await call('tasks', {}));
+    expect(listing.split('\n').find((l) => l.startsWith(third))).toMatch(/queued, not launched yet/);
+    expect(listing.split('\n').find((l) => l.startsWith(third))).not.toMatch(/running, started|still running|\bstarted\b/);
+  });
+
+  it('returns the queued line, not still running, from await with a short timeout on a queued task, and running with a start time after release', async () => {
+    const { call, textOf, idIn, started } = await connectManual();
+    await call('delegate', { agent: 'helper', brief: 'one', wait: false });
+    const second = idIn(textOf(await call('delegate', { agent: 'other', brief: 'two', wait: false })));
+    const waiting = textOf(await call('await', { tasks: [second], timeout_s: 0.05 }));
+    expect(waiting).toContain('queued, not launched yet');
+    expect(waiting).not.toMatch(/running, started|still running|\bstarted\b/);
+    started[0]!.settle();
+    await until(() => started.length === 2);
+    expect(textOf(await call('await', { tasks: [second], timeout_s: 0.05 }))).toMatch(/running, started \d{4}-[\d\-T:.Z]+ \(\d+s ago\)/);
+    started[1]!.settle();
+    expect(textOf(await call('await', { tasks: [second], timeout_s: 5 }))).toMatch(/status: completed/);
+  });
+
+  it('shows a task queued in another process as queued with its wait and no place', async () => {
+    const owner = await connectManual();
+    await owner.call('delegate', { agent: 'helper', brief: 'one', wait: false });
+    const second = owner.idIn(owner.textOf(await owner.call('delegate', { agent: 'other', brief: 'two', wait: false })));
+    const { port } = manualPort();
+    const service = new DelegationService({ env: { SUBZERO_PROJECT_DIR: owner.root }, roots: () => [], warn: () => {}, kernel: kernelWithPort(port) });
+    const server = createSubzeroServer({ service, parentSessionId: () => undefined });
+    const client = new Client({ name: 'test', version: '1' });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+    const text = (r: any) => r.content.map((c: any) => c.text).join('\n') as string;
+    const shown = text(await client.callTool({ name: 'tasks', arguments: { task: second } }, CallToolResultSchema));
+    expect(shown).toMatch(/queued, not launched yet: .*endpoint local .*waiting \d+s/);
+    expect(shown).not.toMatch(/place \d|this session's queue|running, started|still running|\bstarted\b/);
+    expect(shown).toMatch(/another process/);
+    const listing = text(await client.callTool({ name: 'tasks', arguments: {} }, CallToolResultSchema));
+    expect(listing.split('\n').find((l) => l.startsWith(second))).toMatch(/queued, not launched yet/);
+  });
+
+  it('sends progress that says waiting while queued and stops saying it after release', async () => {
+    const { call, textOf, idIn, started } = await connectManual();
+    await call('delegate', { agent: 'helper', brief: 'one', wait: false });
+    const messages: string[] = [];
+    const pending = call('delegate', { agent: 'other', brief: 'two' }, { onprogress: (p) => messages.push(p.message ?? '') });
+    await until(() => messages.some((m) => m.includes('waiting')));
+    started[0]!.settle();
+    await until(() => started.length === 2);
+    await until(() => messages.some((m) => m.includes('running')));
+    const mark = messages.length;
+    await new Promise((r) => setTimeout(r, 500)); // heartbeats continue every 200 ms
+    expect(messages.length).toBeGreaterThan(mark);
+    expect(messages.slice(messages.findIndex((m) => m.includes('running'))).some((m) => m.includes('waiting'))).toBe(false);
+    started[1]!.settle();
+    expect(textOf(await pending)).toMatch(/status: completed/);
+  });
+
   it('caps a listing of 60 tasks at 50, keeps every running task, and says 10 were left out', () => {
     const views: TaskView[] = Array.from({ length: 60 }, (_, i) => ({
       taskId: `sz-${String(i).padStart(6, 'a')}`,
       agent: 'helper',
       status: i % 20 === 0 ? 'running' : 'completed',
+      ...(i % 20 === 0 ? { startedAt: new Date(2026, 0, 1, 0, i, 5).toISOString() } : {}),
       createdAt: new Date(2026, 0, 1, 0, i).toISOString(),
       updatedAt: '',
     }));
     const lines = formatListing(views, true).split('\n');
     const rows = lines.filter((l) => l.startsWith('sz-'));
     expect(rows.length).toBe(50);
-    expect(rows.slice(0, 3).every((r) => r.includes('· running ·'))).toBe(true);
+    expect(rows.slice(0, 3).every((r) => r.includes('· running, started '))).toBe(true);
     expect(lines.at(-1)).toMatch(/^10 tasks were left out; any task can still be read by its task id/);
   });
 });

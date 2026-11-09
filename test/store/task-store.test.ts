@@ -23,7 +23,7 @@ function setup(options: { owner?: { pid: number; startTime: string }; alive?: Re
   });
   const agent = getAgent(root, 'helper');
   const create = (taskId: string, parentSessionId?: string) =>
-    store.createTaskRecord({ taskId, agent, brief: 'b', createdAt: new Date().toISOString(), ...(parentSessionId ? { parentSessionId } : {}) });
+    store.createTaskRecord({ taskId, agent, brief: 'b', endpoint: agent.endpoint, createdAt: new Date().toISOString(), ...(parentSessionId ? { parentSessionId } : {}) });
   return { root, store, warnings, create };
 }
 
@@ -139,5 +139,43 @@ describe('TaskStore', () => {
     store.appendEvent('sz-eeeeee', { kind: 'agent_message', text: 'hi' });
     expect(store.readTaskJson('sz-eeeeee')!.launchSpec!.command).toEqual(['pi']);
     expect(existsSync(path.join(store.taskDir('sz-eeeeee'), 'events.jsonl'))).toBe(true);
+  });
+
+  it('keeps the endpoint and enqueue time from the first write and the start time once it is written, with the status still running', () => {
+    const { store, create } = setup();
+    create('sz-qqqqqa');
+    const queued = store.readTask('sz-qqqqqa')!;
+    expect(queued).toMatchObject({ status: 'running', endpoint: 'local' });
+    expect(queued.createdAt).toBe(queued.task!.createdAt);
+    expect(queued.startedAt).toBeUndefined();
+    expect(queued.task!.endpoint).toBe('local');
+
+    store.writeStartTime('sz-qqqqqa', '2026-01-01T00:00:05.000Z');
+    const started = store.readTask('sz-qqqqqa')!;
+    expect(started).toMatchObject({ status: 'running', endpoint: 'local', startedAt: '2026-01-01T00:00:05.000Z', createdAt: queued.createdAt });
+    // The settled line that follows keeps what the first lines wrote.
+    store.writeResult('sz-qqqqqa', result('sz-qqqqqa'));
+    expect(store.readTask('sz-qqqqqa')).toMatchObject({ status: 'completed', endpoint: 'local', startedAt: '2026-01-01T00:00:05.000Z' });
+  });
+
+  it('shows the start time in a listing of a second process, and a task without one stays running there', () => {
+    const { root, store, create } = setup();
+    create('sz-qqqqqb');
+    create('sz-qqqqqc');
+    store.writeStartTime('sz-qqqqqb', '2026-01-01T00:00:05.000Z');
+    const second = new TaskStore(root, { probe: probe({ [process.pid]: 'now' }) });
+    const views = new Map(second.list().map((v) => [v.taskId, v]));
+    expect(views.get('sz-qqqqqb')).toMatchObject({ status: 'running', startedAt: '2026-01-01T00:00:05.000Z', endpoint: 'local' });
+    expect(views.get('sz-qqqqqc')).toMatchObject({ status: 'running', endpoint: 'local' });
+    expect(views.get('sz-qqqqqc')!.startedAt).toBeUndefined();
+  });
+
+  it('marks a task of a dead owner abandoned when it never got a start time, because its stored status is running', () => {
+    const dead = setup({ owner: { pid: DEAD, startTime: 'then' } });
+    dead.create('sz-qqqqqd');
+    const later = new TaskStore(dead.root, { probe: probe({ [process.pid]: 'now' }), owner: { pid: process.pid, startTime: 'now' } });
+    expect(later.readTask('sz-qqqqqd')!.status).toBe('running');
+    expect(later.sweep()).toEqual(['sz-qqqqqd']);
+    expect(later.readTask('sz-qqqqqd')).toMatchObject({ status: 'abandoned', endpoint: 'local' });
   });
 });

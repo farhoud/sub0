@@ -34,6 +34,7 @@ export class ProgressReporter {
   private readonly heartbeatMs: number;
   private readonly now: () => number;
   private stopped = false;
+  private waiting = false;
 
   constructor(
     private readonly agent: string,
@@ -48,8 +49,15 @@ export class ProgressReporter {
     this.armHeartbeat();
   }
 
+  /** Waiting while the run is Pending; once it is released the line says so and never says waiting again. */
   onState(state: ChildRunState): void {
-    if (state === 'Pending') this.update('waiting');
+    if (state === 'Pending') {
+      this.waiting = true;
+      this.update('waiting');
+    } else if (this.waiting && (state === 'Starting' || state === 'Live')) {
+      this.waiting = false;
+      this.update('running');
+    }
   }
 
   onEvent(event: DomainEvent): void {

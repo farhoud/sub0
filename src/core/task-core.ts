@@ -47,7 +47,8 @@ export class Task {
   private resolveResult!: (result: Result) => void;
   private readonly eventListeners = new Set<Listener<DomainEvent>>();
   private readonly stateListeners = new Set<Listener<ChildRunState>>();
-  private startedAt: number | null = null;
+  private startedMs: number | null = null;
+  private startedIso: string | null = null;
 
   constructor(
     private readonly core: TaskCore,
@@ -65,6 +66,16 @@ export class Task {
 
   get state(): ChildRunState {
     return this.stateValue;
+  }
+
+  /** The enqueue time: when the task was created, before any release. */
+  get enqueuedAt(): string {
+    return this.createdAt;
+  }
+
+  /** When the caller released the child run, or null while it is Pending. Never read from the launch spec. */
+  get startedAt(): string | null {
+    return this.startedIso;
   }
 
   /** The result once the child run has ended, or undefined while it runs. */
@@ -91,8 +102,15 @@ export class Task {
   /** Release a Pending child run: the brief goes to the child port and the run starts. */
   release(): void {
     if (this.stateValue !== 'Pending') return;
+    // The start time is taken at the release, before any listener sees the new state.
+    this.startedMs = Date.now();
+    this.startedIso = new Date(this.startedMs).toISOString();
+    try {
+      this.core.store.writeStartTime(this.taskId, this.startedIso);
+    } catch (err) {
+      this.core.warn(`could not record the start time of ${this.taskId}: ${(err as Error).message}`);
+    }
     this.setState('Starting');
-    this.startedAt = Date.now();
     try {
       this.run = this.port.start(
         {
@@ -153,7 +171,7 @@ export class Task {
       result.failureKind = outcome.failureKind ?? 'error';
       if (outcome.message !== undefined) result.message = outcome.message;
     }
-    if (this.startedAt !== null) result.durationMs = Date.now() - this.startedAt;
+    if (this.startedMs !== null) result.durationMs = Date.now() - this.startedMs;
     return result;
   }
 
@@ -214,6 +232,7 @@ export class TaskCore {
       agent,
       brief: request.brief,
       ...(request.parentSessionId !== undefined ? { parentSessionId: request.parentSessionId } : {}),
+      endpoint: agent.endpoint,
       createdAt,
     });
     return new Task(this, taskId, agent, request.brief, request.port, createdAt);

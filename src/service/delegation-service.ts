@@ -42,14 +42,38 @@ export interface DelegateOptions {
   signal?: AbortSignal;
 }
 
-export type DelegateReply = { kind: 'result'; result: Result } | { kind: 'started'; taskId: string };
+/**
+ * Queued is a view derived on each reply from the live task and the task record,
+ * never a stored task status: a Pending child run of this process, with its place
+ * in this process's queue of the endpoint, or a task of another process that has
+ * no start time, with no place.
+ */
+export interface QueuedStatus {
+  taskId: string;
+  endpoint: string;
+  /** Counted from 1 among the Pending child runs of the endpoint in this process. */
+  place: number;
+  /** The time the task was created. */
+  enqueuedAt: string;
+}
+
+export type DelegateReply =
+  | { kind: 'result'; result: Result }
+  | { kind: 'started'; taskId: string; startedAt: string }
+  | ({ kind: 'queued' } & QueuedStatus);
 
 export type CollectReply =
   | { kind: 'result'; result: Result }
-  | { kind: 'running'; taskId: string }
+  | { kind: 'running'; taskId: string; startedAt: string }
+  | ({ kind: 'queued' } & QueuedStatus)
   | { kind: 'abandoned'; taskId: string }
-  | { kind: 'other_process'; taskId: string }
+  | { kind: 'other_process'; taskId: string; endpoint?: string; enqueuedAt: string; startedAt?: string }
   | { kind: 'not_found'; taskId: string };
+
+/** A task as a listing shows it: its record, and its queue place while it is Pending in this process. */
+export interface TaskListing extends TaskView {
+  queuePlace?: number;
+}
 
 export interface DelegationServiceOptions extends RootSources {
   /** The registry the entry point of this process filled with its child drivers. */
@@ -98,6 +122,14 @@ export class EndpointLimiter {
       }
     });
     this.drain(endpoint);
+  }
+
+  /** The queue place of a Pending task among the Pending runs of its endpoint, from 1; null when it is not queued here. */
+  place(task: Task): number | null {
+    if (task.state !== 'Pending') return null;
+    const pending = (this.queues.get(task.agent.endpoint) ?? []).filter((t) => t.state === 'Pending');
+    const index = pending.indexOf(task);
+    return index < 0 ? null : index + 1;
   }
 
   activeCount(endpoint: string): number {
@@ -205,8 +237,18 @@ export class DelegationService {
     // Only a run the limiter kept back is reported as Pending.
     if (task.state === 'Pending') options.onState?.('Pending');
 
-    if (!options.wait) return { kind: 'started', taskId: task.taskId };
+    if (!options.wait) return this.liveReply(task);
     return { kind: 'result', result: await task.result };
+  }
+
+  /** The reply of a live task that has no result: its start time, or its place in line while Pending. */
+  private liveReply(task: Task): { kind: 'started'; taskId: string; startedAt: string } | ({ kind: 'queued' } & QueuedStatus) {
+    // A task with no start time has not been released, so it is still in line.
+    if (task.startedAt === null) {
+      const place = this.limiter.place(task) ?? 1;
+      return { kind: 'queued', taskId: task.taskId, endpoint: task.agent.endpoint, place, enqueuedAt: task.enqueuedAt };
+    }
+    return { kind: 'started', taskId: task.taskId, startedAt: task.startedAt };
   }
 
   /** Collect by task id: the live registry first, then the task record. */
@@ -216,7 +258,9 @@ export class DelegationService {
     const live = this.registry.get(taskId);
     if (live !== undefined) {
       const result = live.settledResult;
-      return result !== undefined ? { kind: 'result', result } : { kind: 'running', taskId };
+      if (result !== undefined) return { kind: 'result', result };
+      const reply = this.liveReply(live);
+      return reply.kind === 'started' ? { kind: 'running', taskId, startedAt: reply.startedAt } : reply;
     }
     return this.fromRecord(store, taskId);
   }
@@ -225,14 +269,15 @@ export class DelegationService {
   async waitFor(taskId: string, timeoutMs: number): Promise<CollectReply> {
     const first = await this.collect(taskId);
     const live = this.registry.get(taskId);
-    if (first.kind !== 'running' || live === undefined) return first;
+    if ((first.kind !== 'running' && first.kind !== 'queued') || live === undefined) return first;
     let timer: NodeJS.Timeout | undefined;
     const result = await Promise.race([
       live.result,
       new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), Math.max(0, timeoutMs)))),
     ]);
     clearTimeout(timer);
-    return result === null ? first : { kind: 'result', result };
+    // Read the task again: it may have been released while this call waited.
+    return result === null ? this.collect(taskId) : { kind: 'result', result };
   }
 
   async cancel(taskId: string): Promise<CollectReply> {
@@ -244,10 +289,14 @@ export class DelegationService {
     return this.fromRecord(store, taskId);
   }
 
-  async list(parentSessionId?: string): Promise<TaskView[]> {
+  async list(parentSessionId?: string): Promise<TaskListing[]> {
     const { store } = await this.connect();
     store.sweep();
-    return store.list(parentSessionId);
+    return store.list(parentSessionId).map((view) => {
+      const live = this.registry.get(view.taskId);
+      const place = live !== undefined ? this.limiter.place(live) : null;
+      return place !== null ? { ...view, queuePlace: place } : view;
+    });
   }
 
   private fromRecord(store: TaskStore, taskId: string): CollectReply {
@@ -255,7 +304,13 @@ export class DelegationService {
     if (record === null) return { kind: 'not_found', taskId };
     if (record.result !== null) return { kind: 'result', result: record.result };
     if (record.status === 'abandoned') return { kind: 'abandoned', taskId };
-    return { kind: 'other_process', taskId };
+    return {
+      kind: 'other_process',
+      taskId,
+      ...(record.endpoint !== undefined ? { endpoint: record.endpoint } : {}),
+      enqueuedAt: record.createdAt,
+      ...(record.startedAt !== undefined ? { startedAt: record.startedAt } : {}),
+    };
   }
 
   /**

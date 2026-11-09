@@ -6,8 +6,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { LoadError, TierError, UnknownAgentError, UnresolvedRootError } from '../config/agent-config.js';
 import { isTaskId } from '../core/ids.js';
-import { EmptyBriefError, type CollectReply, type DelegationService } from '../service/delegation-service.js';
-import { bound, formatListing, formatResult } from './format.js';
+import { EmptyBriefError, type DelegationService } from '../service/delegation-service.js';
+import { bound, describeReply, formatListing } from './format.js';
 import { ProgressReporter, type ProgressOptions } from './progress.js';
 
 export const SERVER_INSTRUCTIONS = [
@@ -87,21 +87,6 @@ function toolError(err: unknown): CallToolResult {
   return text(`subzero failed: ${(err as Error)?.message ?? String(err)}`, true);
 }
 
-function describeReply(reply: CollectReply): string {
-  switch (reply.kind) {
-    case 'result':
-      return formatResult(reply.result);
-    case 'running':
-      return `task: ${reply.taskId} · still running`;
-    case 'abandoned':
-      return `task: ${reply.taskId} · abandoned: its owner process died, so it has no result`;
-    case 'other_process':
-      return `task: ${reply.taskId} · running in another process; it cannot be collected or cancelled here`;
-    case 'not_found':
-      return `task: ${reply.taskId} · no such task`;
-  }
-}
-
 function stringArg(args: Record<string, unknown>, key: string): string | undefined {
   return typeof args[key] === 'string' ? (args[key] as string) : undefined;
 }
@@ -158,10 +143,7 @@ export function createSubzeroServer(options: SubzeroServerOptions): Server {
                 ...(wait ? { signal: extra.signal } : {}),
               },
             );
-            if (reply.kind === 'started') {
-              return text(`task: ${reply.taskId} · started; collect it with await or cancel it with cancel`);
-            }
-            return text(formatResult(reply.result));
+            return text(describeReply(reply));
           } finally {
             reporter?.stop();
           }
@@ -174,9 +156,7 @@ export function createSubzeroServer(options: SubzeroServerOptions): Server {
             const views = await service.list();
             const view = views.find((v) => v.taskId === task);
             if (view === undefined) return text(`task: ${task} · no such task`);
-            const reply = await service.collect(task);
-            const head = `task: ${view.taskId} · ${view.agent} · ${view.status} · created ${view.createdAt}`;
-            return text(reply.kind === 'result' ? formatResult(reply.result) : `${head}\n${describeReply(reply)}`);
+            return text(describeReply(await service.collect(task), view));
           }
           await service.start();
           const parentSessionId = options.parentSessionId();
@@ -189,7 +169,7 @@ export function createSubzeroServer(options: SubzeroServerOptions): Server {
           if (ids.length === 0) return text('await needs at least one task id', true);
           const seconds = typeof args.timeout_s === 'number' && args.timeout_s >= 0 ? Math.min(args.timeout_s, MAX_AWAIT_SECONDS) : 30;
           const replies = await Promise.all(ids.map((id) => service.waitFor(id, seconds * 1000)));
-          return text(replies.map(describeReply).join('\n\n'));
+          return text(replies.map((r) => describeReply(r)).join('\n\n'));
         }
 
         case 'cancel': {

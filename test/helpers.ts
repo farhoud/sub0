@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } fro
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ChildPort } from '../src/core/types.js';
+import { unavailableUsage, type ChildOutcome, type ChildPort } from '../src/core/types.js';
 import { Kernel } from '../src/kernel/kernel.js';
 import { PI_HOST, PiDriver, type PiDriverOptions } from '../src/pi/driver.js';
 
@@ -106,4 +106,20 @@ export function kernelWithPort(port: ChildPort): Kernel {
   const kernel = new Kernel();
   kernel.registerChildDriver(PI_HOST, { port });
   return kernel;
+}
+
+/** A child port that the test settles by hand, recording each start. */
+export function manualPort() {
+  const started: { taskId: string; settle: (o?: Partial<ChildOutcome>) => void }[] = [];
+  const port: ChildPort = {
+    start(request) {
+      let resolve!: (o: ChildOutcome) => void;
+      const outcome = new Promise<ChildOutcome>((r) => (resolve = r));
+      const settle = (o: Partial<ChildOutcome> = {}) =>
+        resolve({ lastAssistantText: 'ok', status: 'completed', usage: unavailableUsage('n/a'), ...o });
+      started.push({ taskId: request.taskId, settle });
+      return { outcome, cancel: () => settle({ status: 'cancelled' }) };
+    },
+  };
+  return { port, started };
 }

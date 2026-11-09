@@ -31,6 +31,20 @@ describe('progress notification', () => {
     expect(sent.length).toBe(3);
   });
 
+  it('leaves the waiting phase once the run is released, and no heartbeat says waiting again', () => {
+    const sent: string[] = [];
+    const reporter = new ProgressReporter('helper', (_, m) => sent.push(m), { now: () => Date.now() });
+    reporter.onState('Pending');
+    expect(sent).toEqual(['helper · waiting · 0s']);
+    vi.advanceTimersByTime(5_000);
+    reporter.onState('Starting');
+    expect(sent.at(-1)).toBe('helper · running · 5s');
+    vi.advanceTimersByTime(30_000);
+    expect(sent.at(-1)).toBe('helper · running · 35s');
+    expect(sent.slice(1).some((m) => m.includes('waiting'))).toBe(false);
+    reporter.stop();
+  });
+
   it('formats elapsed time', () => {
     expect(formatElapsed(65_000)).toBe('1m05s');
   });
