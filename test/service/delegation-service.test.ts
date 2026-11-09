@@ -5,7 +5,8 @@ import { LoadError, UnknownAgentError, UnresolvedRootError } from '../../src/con
 import { unavailableUsage, type ChildOutcome, type ChildPort } from '../../src/core/types.js';
 import { DelegationService, EmptyBriefError, renderBrief } from '../../src/service/delegation-service.js';
 import { TaskStore } from '../../src/store/task-store.js';
-import { FAKE_PI_COMMAND, fakePiEnv, isAlive, makeProject, tempDir, until } from '../helpers.js';
+import { Kernel } from '../../src/kernel/kernel.js';
+import { FAKE_PI_COMMAND, fakePiEnv, isAlive, kernelWithPort, makeProject, piKernel, tempDir, until } from '../helpers.js';
 
 /** A child port that the test settles by hand, recording each start. */
 function manualPort() {
@@ -23,11 +24,11 @@ function manualPort() {
   return { port, started };
 }
 
-function service(root: string, port?: ChildPort) {
+function service(root: string, port: ChildPort) {
   return new DelegationService({
     env: { SUBZERO_PROJECT_DIR: root },
     warn: () => {},
-    ...(port ? { childPort: () => port } : {}),
+    kernel: kernelWithPort(port),
   });
 }
 
@@ -63,7 +64,7 @@ describe('DelegationService', () => {
     // A task of a dead owner process, left running in the index.
     const dead = new TaskStore(root, { owner: { pid: 999_999, startTime: 'then' } });
     dead.createTaskRecord({ taskId: 'sz-dddddd', agent: { name: 'helper' } as never, brief: 'b', createdAt: new Date().toISOString() });
-    const svc = new DelegationService({ env, roots: () => [], warn: () => {}, childPort: () => manualPort().port });
+    const svc = new DelegationService({ env, roots: () => [], warn: () => {}, kernel: kernelWithPort(manualPort().port) });
     await expect(svc.delegate({ agent: 'helper', briefText: 'b' }, { wait: false })).rejects.toBeInstanceOf(UnresolvedRootError);
     expect(svc.projectRoot).toBeUndefined();
     env.SUBZERO_PROJECT_DIR = root;
@@ -190,14 +191,13 @@ describe('DelegationService', () => {
   it('kills a child run that ignores every stop once the shutdown deadline passes', async () => {
     const root = makeProject();
     const fake = fakePiEnv({ turn: [{ hang: true }], ignoreAbort: true, ignoreStdinEnd: true, ignoreSigterm: true });
-    const svc = new DelegationService({
-      env: { SUBZERO_PROJECT_DIR: root },
-      warn: () => {},
-      driver: { piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() },
-    });
+    const { kernel, driver } = piKernel({ piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() });
+    const svc = new DelegationService({ env: { SUBZERO_PROJECT_DIR: root }, warn: () => {}, kernel });
     await svc.delegate({ agent: 'helper', briefText: 'go' }, { wait: false });
     await until(() => fake.log().some((l) => l.command === 'prompt'));
-    await svc.shutdown(300);
+    // As the entry point does: the service reports what outlived the deadline, the driver kills it.
+    expect(await svc.shutdown(300)).toBe(false);
+    driver.killAll();
     await until(() => !isAlive(fake.log()[0].pid));
   });
 
@@ -207,11 +207,38 @@ describe('DelegationService', () => {
     const svc = new DelegationService({
       env: { SUBZERO_PROJECT_DIR: root },
       warn: () => {},
-      driver: { piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() },
+      kernel: piKernel({ piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() }).kernel,
     });
     const events: string[] = [];
     const reply = await svc.delegate({ agent: 'helper', briefText: 'go' }, { wait: true, onEvent: (e) => events.push(e.kind) });
     expect(reply).toMatchObject({ kind: 'result', result: { status: 'completed', summary: 'Done: wrote the answer.' } });
     expect(events).toContain('skills_verified');
+  });
+
+  it('hands the child port the folders of the project, the sessions and the driver files of the task', async () => {
+    const root = makeProject();
+    let request: any;
+    const port: ChildPort = {
+      start(r) {
+        request = r;
+        return { outcome: Promise.resolve({ lastAssistantText: 'ok', status: 'completed', usage: unavailableUsage('n/a') }), cancel() {} };
+      },
+    };
+    const svc = service(root, port);
+    await svc.delegate({ agent: 'helper', briefText: 'go' }, { wait: true });
+    expect(request).toMatchObject({
+      projectRoot: root,
+      sessionsFolder: path.join(root, '.agents', 'subzero', 'sessions'),
+      driverFilesFolder: path.join(root, '.agents', 'subzero', 'tasks', request.taskId),
+    });
+  });
+
+  it('refuses a host with no registered driver, naming the host and the supported hosts, and makes no task', async () => {
+    const root = makeProject();
+    const kernel = new Kernel();
+    const svc = new DelegationService({ env: { SUBZERO_PROJECT_DIR: root }, warn: () => {}, kernel });
+    await expect(svc.delegate({ agent: 'helper', briefText: 'go' }, { wait: false })).rejects.toThrow(/"pi".*supported hosts: \(none\)/s);
+    expect(await svc.list()).toEqual([]);
+    expect(indexLines(root)).toEqual([]);
   });
 });

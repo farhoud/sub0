@@ -1,8 +1,9 @@
 // @sigil implements design/delegation-service.sigil DelegationService
 //
 // The one entry every front end uses. It resolves the project root once per
-// process, runs the start-up sweep, connects TaskCore to PiDriver and TaskStore,
-// and owns the live task registry and the per-endpoint parallel limit.
+// process, runs the start-up sweep, asks the Kernel registry for the child port of
+// the host of an agent definition and hands it to TaskCore, and owns the live task
+// registry and the per-endpoint parallel limit. It names no host or child driver.
 import {
   getAgent,
   resolveProjectRoot,
@@ -11,8 +12,8 @@ import {
   type RootSources,
 } from '../config/agent-config.js';
 import { Task, TaskCore } from '../core/task-core.js';
-import { ENDED_STATES, type ChildPort, type ChildRunState, type DomainEvent, type Result } from '../core/types.js';
-import { PiDriver, type PiDriverOptions } from '../pi/driver.js';
+import { ENDED_STATES, type ChildRunState, type DomainEvent, type Result } from '../core/types.js';
+import type { Kernel } from '../kernel/kernel.js';
 import { TaskStore, type TaskStoreOptions, type TaskView } from '../store/task-store.js';
 
 /** The request of a front end. */
@@ -50,9 +51,8 @@ export type CollectReply =
   | { kind: 'not_found'; taskId: string };
 
 export interface DelegationServiceOptions extends RootSources {
-  /** Replaces PiDriver, for tests. Receives the resolved project root. */
-  childPort?: (projectRoot: string, store: TaskStore) => ChildPort;
-  driver?: Omit<PiDriverOptions, 'projectRoot' | 'sessionsFolder'>;
+  /** The registry the entry point of this process filled with its child drivers. */
+  kernel: Kernel;
   store?: TaskStoreOptions;
   warn?: (message: string) => void;
 }
@@ -61,7 +61,6 @@ interface Connected {
   projectRoot: string;
   store: TaskStore;
   core: TaskCore;
-  driver: PiDriver | null;
 }
 
 /** Render the files and the expected output after the brief text, into one brief. */
@@ -133,7 +132,7 @@ export class DelegationService {
   private readonly limiter = new EndpointLimiter();
   private readonly warn: (message: string) => void;
 
-  constructor(private readonly options: DelegationServiceOptions = {}) {
+  constructor(private readonly options: DelegationServiceOptions) {
     this.warn = options.warn ?? ((m) => process.stderr.write(`subzero: ${m}\n`));
   }
 
@@ -163,12 +162,8 @@ export class DelegationService {
         if (root instanceof UnresolvedRootError) throw root;
         const store = new TaskStore(root, { warn: this.warn, ...this.options.store });
         store.sweep();
-        const driver = this.options.childPort
-          ? null
-          : new PiDriver({ ...this.options.driver, projectRoot: root, sessionsFolder: store.sessionsFolder });
-        const port = driver ?? this.options.childPort!(root, store);
-        const core = new TaskCore({ port, store, warn: this.warn });
-        this.connected = { projectRoot: root, store, core, driver };
+        const core = new TaskCore({ projectRoot: root, store, warn: this.warn });
+        this.connected = { projectRoot: root, store, core };
         return this.connected;
       })();
       this.starting.catch(() => (this.starting = null));
@@ -184,9 +179,12 @@ export class DelegationService {
     const { projectRoot, core } = await this.connect();
     if (delegation.briefText.trim() === '') throw new EmptyBriefError();
     const agent: AgentDefinition = getAgent(projectRoot, delegation.agent);
+    // The registry refuses a host with no child driver, naming it, before any task exists.
+    const port = this.options.kernel.childPort(agent.host);
 
     const task = core.start({
       agent,
+      port,
       brief: renderBrief(delegation),
       ...(delegation.parentSessionId !== undefined ? { parentSessionId: delegation.parentSessionId } : {}),
     });
@@ -258,10 +256,11 @@ export class DelegationService {
   }
 
   /**
-   * Cancel every live child run of this process and wait for each to end. Past
-   * the deadline, SIGKILL whatever is left, so no child run outlives the caller.
+   * Cancel every live child run of this process and wait for each to end. Returns
+   * false when some were still live at the deadline: the entry point, which holds
+   * the child drivers, then kills what is left, so no child run outlives the process.
    */
-  async shutdown(deadlineMs = 8000): Promise<void> {
+  async shutdown(deadlineMs = 8000): Promise<boolean> {
     const live = [...this.registry.values()].filter((task) => task.settledResult === undefined);
     let timer: NodeJS.Timeout | undefined;
     const ended = await Promise.race([
@@ -269,6 +268,6 @@ export class DelegationService {
       new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), deadlineMs))),
     ]);
     clearTimeout(timer);
-    if (!ended) this.connected?.driver?.killAll();
+    return ended;
   }
 }

@@ -95,10 +95,19 @@ export interface ChildOutcome {
   sessionFile?: string;
 }
 
+/**
+ * What a child driver receives on each start. It resolves none of these itself
+ * and reads no task record.
+ */
 export interface ChildRunRequest {
   taskId: string;
   agent: AgentDefinition;
   brief: string;
+  projectRoot: string;
+  /** Where TaskStore keeps child sessions. */
+  sessionsFolder: string;
+  /** Where the driver keeps its own files of the task, beside the task record. */
+  driverFilesFolder: string;
 }
 
 export interface ChildRun {
@@ -109,4 +118,28 @@ export interface ChildRun {
 /** The child port: the only way TaskCore reaches a child. */
 export interface ChildPort {
   start(request: ChildRunRequest, onEvent: (event: DomainEvent) => void): ChildRun;
+}
+
+/** Builds the command that reopens a child session in its program's terminal interface. */
+export type AttachCommand = (spec: LaunchSpec) => string[];
+
+/** Writes a child session as a document a person can read; rejects with the reason. */
+export type SessionExport = (sessionFile: string, outputFile: string) => Promise<void>;
+
+/** The tool lists that suit a general agent and a read-only fallback agent on one host. */
+export interface StarterTools {
+  general: string[];
+  fallback: string[];
+}
+
+/**
+ * A child driver: its child port, and whatever else it offers. A caller asks for
+ * the attach command, session export and starter tools through the driver of the
+ * host, and never assumes a driver offers them.
+ */
+export interface ChildDriver {
+  port: ChildPort;
+  attachCommand?: AttachCommand;
+  sessionExport?: SessionExport;
+  starterTools?: () => StarterTools;
 }

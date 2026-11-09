@@ -4,15 +4,26 @@ import { describe, expect, it } from 'vitest';
 import { getAgent, type AgentDefinition } from '../../src/config/agent-config.js';
 import type { ChildOutcome, DomainEvent } from '../../src/core/types.js';
 import { PiDriver } from '../../src/pi/driver.js';
+import type { ChildRunRequest } from '../../src/core/types.js';
 import { DEFAULT_YAML, FAKE_PI_COMMAND, fakePiEnv, isAlive, makeProject, tempDir, until } from '../helpers.js';
+
+/** What TaskCore hands the child port on each start. */
+function request(root: string, agent: AgentDefinition, brief: string, taskId = 'sz-abcdef', sessions = 'sessions'): ChildRunRequest {
+  return {
+    taskId,
+    agent,
+    brief,
+    projectRoot: root,
+    sessionsFolder: path.join(root, '.agents', 'subzero', sessions),
+    driverFilesFolder: path.join(root, '.agents', 'subzero', 'tasks', taskId),
+  };
+}
 
 function setup(scenario: Record<string, unknown> = {}, agentName = 'helper', patch: Partial<AgentDefinition> = {}) {
   const root = makeProject();
   const fake = fakePiEnv(scenario);
   const logs: string[] = [];
   const driver = new PiDriver({
-    projectRoot: root,
-    sessionsFolder: path.join(root, '.agents', 'subzero', 'sessions'),
     piCommand: FAKE_PI_COMMAND,
     env: fake.env,
     piAgentDir: tempDir(),
@@ -22,7 +33,7 @@ function setup(scenario: Record<string, unknown> = {}, agentName = 'helper', pat
   });
   const agent = { ...getAgent(root, agentName), ...patch };
   const events: DomainEvent[] = [];
-  const start = (brief = 'the brief') => driver.start({ taskId: 'sz-abcdef', agent, brief }, (e) => events.push(e));
+  const start = (brief = 'the brief') => driver.start(request(root, agent, brief), (e) => events.push(e));
   return { root, fake, driver, agent, events, logs, start };
 }
 
@@ -194,9 +205,9 @@ describe('PiDriver', () => {
     writeFileSync(path.join(agentDir, 'SYSTEM.md'), 'be someone else');
     const root = makeProject();
     const fake = fakePiEnv();
-    const driver = new PiDriver({ projectRoot: root, sessionsFolder: path.join(root, 's'), piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: agentDir });
+    const driver = new PiDriver({ piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: agentDir });
     const events: DomainEvent[] = [];
-    const outcome = await driver.start({ taskId: 'sz-abcdef', agent: getAgent(root, 'helper'), brief: 'b' }, (e) => events.push(e)).outcome;
+    const outcome = await driver.start(request(root, getAgent(root, 'helper'), 'b', 'sz-abcdef', 's'), (e) => events.push(e)).outcome;
     expect(events[0]).toMatchObject({ kind: 'warning' });
     expect(outcome.status).toBe('completed');
   });
@@ -214,8 +225,8 @@ describe('PiDriver', () => {
     const yaml = DEFAULT_YAML.replace('alpha: ./skills/alpha', 'web: ./skills/alpha').replace('skills: [alpha, beta]', 'skills: [web, beta]').replace('skills: [alpha]', 'skills: [web]');
     const root = makeProject(yaml);
     const fake = fakePiEnv();
-    const driver = new PiDriver({ projectRoot: root, sessionsFolder: path.join(root, 's'), piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() });
-    const outcome = await driver.start({ taskId: 'sz-abcdef', agent: getAgent(root, 'helper'), brief: 'b' }, () => {}).outcome;
+    const driver = new PiDriver({ piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() });
+    const outcome = await driver.start(request(root, getAgent(root, 'helper'), 'b', 'sz-abcdef', 's'), () => {}).outcome;
     expect(outcome.status).toBe('completed');
   });
 
@@ -249,8 +260,8 @@ describe('PiDriver', () => {
     const root = makeProject();
     writeFileSync(path.join(root, '.agents', 'skills', 'beta', 'SKILL.md'), '---\nname: alpha\n---\nB.\n');
     const fake = fakePiEnv({ dropSkills: ['beta'] });
-    const driver = new PiDriver({ projectRoot: root, sessionsFolder: path.join(root, 's'), piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() });
-    const outcome = await driver.start({ taskId: 'sz-abcdef', agent: getAgent(root, 'helper'), brief: 'b' }, () => {}).outcome;
+    const driver = new PiDriver({ piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() });
+    const outcome = await driver.start(request(root, getAgent(root, 'helper'), 'b', 'sz-abcdef', 's'), () => {}).outcome;
     expect(outcome).toMatchObject({ status: 'failed', failureKind: 'skill_mismatch' });
   });
 
@@ -279,5 +290,25 @@ describe('PiDriver', () => {
     await start().outcome;
     const overlay = path.join(root, '.agents', 'subzero', 'tasks', 'sz-abcdef', 'skills', 'alpha', 'SKILL.md');
     expect(existsSync(overlay)).toBe(true);
+  });
+
+  it('takes its folders from the child port: the sessions folder, the overlay in the driver-files folder and the cwd', async () => {
+    const { start, events, root } = setup();
+    await start().outcome;
+    const spec = (events.find((e) => e.kind === 'run_started') as any).launchSpec;
+    expect(spec.cwd).toBe(root);
+    expect(spec.command.join(' ')).toContain(`--session-dir ${path.join(root, '.agents', 'subzero', 'sessions')}`);
+    expect(spec.skillFolders.every((f: string) => f.startsWith(path.join(root, '.agents', 'subzero', 'tasks', 'sz-abcdef', 'skills')))).toBe(true);
+  });
+
+  it('offers its child port, attach command, session export and starter tools as the child driver', () => {
+    const driver = new PiDriver({ piCommand: FAKE_PI_COMMAND });
+    expect(driver.starterTools()).toEqual({
+      general: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'],
+      fallback: ['read', 'grep', 'find', 'ls'],
+    });
+    expect(typeof driver.port.start).toBe('function');
+    expect(driver.attachCommand({ command: ['pi', '--mode', 'rpc', '--session-id', 'sz-abcdef'], cwd: '/p', envNames: [], version: '1', skillFolders: [], thinkingLevel: 'low' })).toEqual(['pi', '--session-id', 'sz-abcdef']);
+    expect(typeof driver.sessionExport).toBe('function');
   });
 });

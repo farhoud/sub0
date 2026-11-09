@@ -2,6 +2,9 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } fro
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ChildPort } from '../src/core/types.js';
+import { Kernel } from '../src/kernel/kernel.js';
+import { PI_HOST, PiDriver, type PiDriverOptions } from '../src/pi/driver.js';
 
 export const FAKE_PI = fileURLToPath(new URL('./fake-pi/fake-pi.mjs', import.meta.url));
 export const FAKE_PI_COMMAND = [process.execPath, FAKE_PI];
@@ -90,4 +93,19 @@ export async function until(check: () => boolean, ms = 5000): Promise<void> {
     if (Date.now() > end) throw new Error('condition not met in time');
     await new Promise((r) => setTimeout(r, 20));
   }
+}
+
+/** What an entry point does: a Kernel with PiDriver registered for the host pi. */
+export function piKernel(options: PiDriverOptions = {}): { kernel: Kernel; driver: PiDriver } {
+  const driver = new PiDriver(options);
+  const kernel = new Kernel();
+  kernel.registerChildDriver(PI_HOST, driver);
+  return { kernel, driver };
+}
+
+/** A Kernel whose host pi runs the given child port, for tests that settle runs by hand. */
+export function kernelWithPort(port: ChildPort): Kernel {
+  const kernel = new Kernel();
+  kernel.registerChildDriver(PI_HOST, { port });
+  return kernel;
 }

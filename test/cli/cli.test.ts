@@ -1,9 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { runCli } from '../../src/cli/main.js';
+import { runCli } from '../../src/cli/cli.js';
+import { unavailableUsage } from '../../src/core/types.js';
+import { Kernel } from '../../src/kernel/kernel.js';
 import { TaskStore } from '../../src/store/task-store.js';
-import { FAKE_PI_COMMAND, fakePiEnv, makeProject, tempDir } from '../helpers.js';
+import { FAKE_PI_COMMAND, fakePiEnv, kernelWithPort, makeProject, piKernel, tempDir } from '../helpers.js';
 
 function cli(root: string, scenario: Record<string, unknown> = {}) {
   const fake = fakePiEnv(scenario);
@@ -14,7 +16,7 @@ function cli(root: string, scenario: Record<string, unknown> = {}) {
       env: { SUBZERO_PROJECT_DIR: root },
       warn: () => {},
       interactive: false,
-      driver: { piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() },
+      kernel: piKernel({ piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir() }).kernel,
     });
   return { run, out, err, fake };
 }
@@ -96,5 +98,50 @@ describe('Cli', () => {
     const { run, out } = cli(root);
     await run('show', 'sz-abandd');
     expect(out[0]).toMatch(/abandoned.*no result/);
+  });
+
+  describe('through the driver registry', () => {
+    /** A settled task of the host pi, with a launch spec and a child session, written by hand. */
+    function settledTask(root: string) {
+      const store = new TaskStore(root);
+      const agent = { name: 'helper', host: 'pi' } as never;
+      store.createTaskRecord({ taskId: 'sz-settle', agent, brief: 'b', createdAt: new Date().toISOString() });
+      store.writeLaunchSpec('sz-settle', { command: ['x', '--mode', 'rpc'], cwd: root, envNames: [], version: '1', skillFolders: [], thinkingLevel: 'low' });
+      store.writeResult('sz-settle', { taskId: 'sz-settle', agent: 'helper', status: 'completed', usage: unavailableUsage('n/a') }, { sessionFile: '/s/sz-settle.jsonl' });
+    }
+    const bare = (root: string) => {
+      const out: string[] = [];
+      const err: string[] = [];
+      const run = (...argv: string[]) =>
+        runCli(argv, { out: (t) => out.push(t), err: (t) => err.push(t) }, {
+          env: { SUBZERO_PROJECT_DIR: root },
+          warn: () => {},
+          interactive: false,
+          kernel: kernelWithPort({ start: () => { throw new Error('no child is started here'); } }),
+        });
+      return { run, out, err };
+    };
+
+    it('refuses attach and show naming the host when its driver offers neither', async () => {
+      const root = makeProject();
+      settledTask(root);
+      const { run, err } = bare(root);
+      expect(await run('attach', 'sz-settle')).toBe(1);
+      expect(err.at(-1)).toMatch(/host pi offers no attach command/);
+      expect(await run('show', 'sz-settle')).toBe(1);
+      expect(err.at(-1)).toMatch(/host pi offers no session export/);
+    });
+
+    it('refuses attach and show naming the host and the supported hosts when no driver is registered for it', async () => {
+      const root = makeProject();
+      settledTask(root);
+      const err: string[] = [];
+      const run = (...argv: string[]) =>
+        runCli(argv, { out: () => {}, err: (t) => err.push(t) }, { env: { SUBZERO_PROJECT_DIR: root }, warn: () => {}, interactive: false, kernel: new Kernel() });
+      expect(await run('attach', 'sz-settle')).toBe(1);
+      expect(err.at(-1)).toMatch(/"pi".*supported hosts: \(none\)/);
+      expect(await run('show', 'sz-settle')).toBe(1);
+      expect(err.at(-1)).toMatch(/"pi".*supported hosts: \(none\)/);
+    });
   });
 });

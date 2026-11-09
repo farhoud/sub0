@@ -1,7 +1,9 @@
 // @sigil implements design/task-core.sigil TaskCore
 //
 // Runs each task on one child through the child port and keeps it in the task
-// record. TaskCore imports no child driver: DelegationService hands it a port.
+// record. TaskCore imports no child driver: its caller hands it the port of the
+// host of the agent definition, and TaskCore hands the port the project root, the
+// sessions folder and the driver-files folder of the task on each start.
 import type { AgentDefinition } from '../config/agent-config.js';
 import type { TaskRecordWriter } from '../store/task-store.js';
 import { newTaskId } from './ids.js';
@@ -20,11 +22,13 @@ import {
 export interface TaskRequest {
   agent: AgentDefinition;
   brief: string;
+  /** The child port of the host of the agent definition. */
+  port: ChildPort;
   parentSessionId?: string;
 }
 
 export interface TaskCoreOptions {
-  port: ChildPort;
+  projectRoot: string;
   store: TaskRecordWriter;
   warn?: (message: string) => void;
 }
@@ -50,6 +54,7 @@ export class Task {
     taskId: string,
     agent: AgentDefinition,
     private readonly brief: string,
+    private readonly port: ChildPort,
     createdAt: string,
   ) {
     this.taskId = taskId;
@@ -89,8 +94,15 @@ export class Task {
     this.setState('Starting');
     this.startedAt = Date.now();
     try {
-      this.run = this.core.port.start(
-        { taskId: this.taskId, agent: this.agent, brief: this.brief },
+      this.run = this.port.start(
+        {
+          taskId: this.taskId,
+          agent: this.agent,
+          brief: this.brief,
+          projectRoot: this.core.projectRoot,
+          sessionsFolder: this.core.store.sessionsFolder,
+          driverFilesFolder: this.core.store.driverFilesFolder(this.taskId),
+        },
         (event) => this.handleEvent(event),
       );
     } catch (err) {
@@ -174,12 +186,12 @@ export class Task {
 }
 
 export class TaskCore {
-  readonly port: ChildPort;
+  readonly projectRoot: string;
   readonly store: TaskRecordWriter;
   readonly warn: (message: string) => void;
 
   constructor(options: TaskCoreOptions) {
-    this.port = options.port;
+    this.projectRoot = options.projectRoot;
     this.store = options.store;
     this.warn = options.warn ?? ((m) => process.stderr.write(`subzero: ${m}\n`));
   }
@@ -204,6 +216,6 @@ export class TaskCore {
       ...(request.parentSessionId !== undefined ? { parentSessionId: request.parentSessionId } : {}),
       createdAt,
     });
-    return new Task(this, taskId, agent, request.brief, createdAt);
+    return new Task(this, taskId, agent, request.brief, request.port, createdAt);
   }
 }

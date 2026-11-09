@@ -8,7 +8,7 @@ import { formatListing } from '../../src/mcp/format.js';
 import { createSubzeroServer } from '../../src/mcp/server.js';
 import { DelegationService } from '../../src/service/delegation-service.js';
 import type { TaskView } from '../../src/store/task-store.js';
-import { FAKE_PI, FAKE_PI_COMMAND, fakePiEnv, isAlive, makeProject, tempDir, until } from '../helpers.js';
+import { FAKE_PI, FAKE_PI_COMMAND, fakePiEnv, isAlive, makeProject, piKernel, tempDir, until } from '../helpers.js';
 
 const REPO = path.resolve(import.meta.dirname, '..', '..');
 
@@ -19,7 +19,7 @@ async function connect(scenario: Record<string, unknown> = {}, env: NodeJS.Proce
     env: env ?? { SUBZERO_PROJECT_DIR: root },
     roots: () => [],
     warn: () => {},
-    driver: { piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir(), abortWaitMs: 300, killWaitMs: 300 },
+    kernel: piKernel({ piCommand: FAKE_PI_COMMAND, env: fake.env, piAgentDir: tempDir(), abortWaitMs: 300, killWaitMs: 300 }).kernel,
   });
   const server = createSubzeroServer({ service, parentSessionId: () => sessionId, progress: { minIntervalMs: 10, heartbeatMs: 200 } });
   const client = new Client({ name: 'test', version: '1' });

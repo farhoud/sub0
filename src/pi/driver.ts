@@ -11,6 +11,7 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   unavailableUsage,
+  type ChildDriver,
   type ChildOutcome,
   type ChildPort,
   type ChildRun,
@@ -19,17 +20,21 @@ import {
   type LaunchSpec,
   type Measure,
   type SessionUsage,
+  type StarterTools,
   type Unavailable,
 } from '../core/types.js';
 import { CHILD_ENV, attachCommand, launchArgs } from './launch.js';
 import { missingSkills, prepareOverlay } from './overlay.js';
 import { PiRpcClient, type PiEvent, type PiResponse } from './rpc-client.js';
 
+/** The host name under which an entry point registers PiDriver with Kernel. */
+export const PI_HOST = 'pi';
+
+/**
+ * The project root, the sessions folder and the driver-files folder come through the
+ * child port on each start; the driver resolves none of them and calls no store.
+ */
 export interface PiDriverOptions {
-  /** Handed over by DelegationService; the driver resolves no root of its own. */
-  projectRoot: string;
-  /** From TaskStore. */
-  sessionsFolder: string;
   /** The pi program and any leading arguments. Defaults to the installed pi. */
   piCommand?: string[];
   env?: NodeJS.ProcessEnv;
@@ -65,15 +70,37 @@ const QUIET_EVENTS = new Set([
 ]);
 const DIALOG_METHODS = new Set(['select', 'confirm', 'input', 'editor']);
 
-export class PiDriver implements ChildPort {
+export class PiDriver implements ChildDriver {
   private version: string | Unavailable | undefined;
   private readonly live = new Set<PiChildRun>();
 
-  constructor(private readonly options: PiDriverOptions) {}
+  /** The child port of this driver, which Kernel hands to a caller. */
+  readonly port: ChildPort = { start: (request, onEvent) => this.start(request, onEvent) };
 
-  static attachCommand(spec: LaunchSpec): string[] {
-    return attachCommand(spec);
-  }
+  constructor(private readonly options: PiDriverOptions = {}) {}
+
+  /** Reopens the child session in the pi terminal interface. */
+  readonly attachCommand = (spec: LaunchSpec): string[] => attachCommand(spec);
+
+  /** The child session as HTML, written by pi --export. Rejects with the reason. */
+  readonly sessionExport = (sessionFile: string, outputFile: string): Promise<void> => {
+    const [program, ...lead] = this.piCommand;
+    return new Promise((resolve, reject) => {
+      const child = spawn(program!, [...lead, '--export', sessionFile, outputFile], {
+        stdio: ['ignore', 'inherit', 'inherit'],
+        env: this.options.env ?? process.env,
+      });
+      child.once('error', (err) => reject(new Error(`could not start ${program}: ${err.message}`)));
+      child.once('exit', (code) =>
+        code === 0 ? resolve() : reject(new Error(`${program} --export exited with code ${code ?? 'unknown'}`)),
+      );
+    });
+  };
+
+  readonly starterTools = (): StarterTools => ({
+    general: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'],
+    fallback: ['read', 'grep', 'find', 'ls'],
+  });
 
   get piCommand(): string[] {
     return this.options.piCommand ?? ['pi'];
@@ -167,7 +194,7 @@ class PiChildRun {
   }
 
   private async main(): Promise<ChildOutcome> {
-    const { agent, taskId, brief } = this.request;
+    const { agent, taskId, brief, projectRoot, sessionsFolder, driverFilesFolder } = this.request;
 
     const missing = missingSkills(agent.skills);
     if (missing.length > 0) {
@@ -175,7 +202,7 @@ class PiChildRun {
     }
     if (this.stop !== null) return this.stoppedBeforeSpawn();
 
-    const overlay = prepareOverlay(this.options.projectRoot, taskId, agent.skills);
+    const overlay = prepareOverlay(driverFilesFolder, agent.skills);
     const env = this.options.env ?? process.env;
     const agentDir = this.options.piAgentDir ?? env.PI_CODING_AGENT_DIR ?? path.join(homedir(), '.pi', 'agent');
     if (existsSync(path.join(agentDir, 'SYSTEM.md'))) {
@@ -187,11 +214,11 @@ class PiChildRun {
 
     const command = [
       ...this.driver.piCommand,
-      ...launchArgs({ taskId, agent, overlaySkills: overlay, sessionsFolder: this.options.sessionsFolder }),
+      ...launchArgs({ taskId, agent, overlaySkills: overlay, sessionsFolder }),
     ];
     const launchSpec: LaunchSpec = {
       command,
-      cwd: this.options.projectRoot,
+      cwd: projectRoot,
       envNames: Object.keys(CHILD_ENV),
       version: this.driver.piVersion(),
       skillFolders: overlay,
@@ -244,7 +271,7 @@ class PiChildRun {
     // A process group leader so the whole group can be signalled. Its stdio pipes
     // stay attached and it is never unref'd, so pi sees EOF when this process dies.
     const child = spawn(program!, args, {
-      cwd: this.options.projectRoot,
+      cwd: this.request.projectRoot,
       env: { ...(this.options.env ?? process.env), ...CHILD_ENV },
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,

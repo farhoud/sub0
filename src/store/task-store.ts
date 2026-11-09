@@ -6,6 +6,7 @@
 //   tasks/<id>/task.json  frozen agent definition, brief and, once started, the launch spec
 //   tasks/<id>/events.jsonl
 //   tasks/<id>/turns/1.json  the exact result the parent received
+//   tasks/<id>/            also holds the driver files of the task, which the store never writes
 //   sessions/             child sessions
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -118,6 +119,9 @@ export interface TaskStoreOptions {
  * reads through TaskStore.
  */
 export interface TaskRecordWriter {
+  readonly sessionsFolder: string;
+  /** The folder where the child driver keeps its own files of a task. */
+  driverFilesFolder(taskId: string): string;
   createTaskRecord(task: TaskJson): void;
   writeLaunchSpec(taskId: string, spec: LaunchSpec): void;
   appendEvent(taskId: string, event: DomainEvent): void;
@@ -145,6 +149,11 @@ export class TaskStore implements TaskRecordWriter {
 
   taskDir(taskId: string): string {
     return path.join(this.storeFolder, 'tasks', taskId);
+  }
+
+  /** The driver files of a task sit in its task folder, beside the task record. */
+  driverFilesFolder(taskId: string): string {
+    return this.taskDir(taskId);
   }
 
   private get owner(): OwnerProcess {
