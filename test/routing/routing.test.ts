@@ -1,0 +1,131 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  DELEGATE_TOOL,
+  aliasTier,
+  buildRoutingText,
+  isGenericSpawn,
+  routingContext,
+  wordTiers,
+} from '../../src/routing/routing.js';
+import { routableTiers } from '../../src/config/agent-config.js';
+import { tempDir } from '../helpers.js';
+
+function project(yaml?: string): string {
+  const root = tempDir();
+  if (yaml !== undefined) {
+    mkdirSync(path.join(root, '.agents'), { recursive: true });
+    writeFileSync(path.join(root, '.agents', 'subzero.yaml'), yaml);
+  }
+  return root;
+}
+
+const tier = (name: string, model: string) => `    ${name}: { host: pi, model: ${model}, thinking: low }\n`;
+const GENERAL = 'agents:\n  general:\n    tools: [read, bash]\n    timeout: 60\n';
+const config = (...names: string[]) =>
+  `models:\n  tiers:\n${tier('default', 'local/d')}${names.map((n) => tier(n, `local/${n}`)).join('')}${GENERAL}`;
+
+describe('alias table', () => {
+  it('maps a missing model to large, haiku to small, sonnet to medium, and neither opus nor fable', () => {
+    expect(aliasTier(undefined)).toBe('large');
+    expect(aliasTier('haiku')).toBe('small');
+    expect(aliasTier('sonnet')).toBe('medium');
+    expect(aliasTier('opus')).toBeUndefined();
+    expect(aliasTier('fable')).toBeUndefined();
+    expect(aliasTier('something-else')).toBeUndefined();
+  });
+});
+
+describe('generic spawn test', () => {
+  it('treats an absent subagent_type, general-purpose and claude as generic, and names as specialists', () => {
+    expect(isGenericSpawn({})).toBe(true);
+    expect(isGenericSpawn({ subagent_type: 'general-purpose' })).toBe(true);
+    expect(isGenericSpawn({ subagent_type: 'claude' })).toBe(true);
+    expect(isGenericSpawn({ subagent_type: 'Explore' })).toBe(false);
+    expect(isGenericSpawn({ subagent_type: 'fork' })).toBe(false);
+  });
+
+  it('lets the routing settings replace the generic list', () => {
+    expect(isGenericSpawn({ subagent_type: 'general-purpose' }, ['worker'])).toBe(false);
+    expect(isGenericSpawn({ subagent_type: 'worker' }, ['worker'])).toBe(true);
+    expect(isGenericSpawn({}, ['worker'])).toBe(true);
+  });
+});
+
+describe('routing text', () => {
+  const textFor = (root: string) => buildRoutingText(wordTiers(routableTiers(root)));
+
+  it('AE1: with only medium configured, sends mid-tier to delegate and keeps the other tier words on Claude', () => {
+    const text = textFor(project(config('medium')));
+    expect(text).toMatch(/mid-tier[^\n]*medium[^\n]*tier: "medium"/);
+    expect(text).toContain('local/medium');
+    expect(text).toMatch(/cheapest capable[^\n]*stay[^\n]*Claude/i);
+    expect(text).toMatch(/session model[^\n]*stay[^\n]*Claude/i);
+    expect(text).not.toContain('tier: "small"');
+    expect(text).not.toContain('tier: "large"');
+  });
+
+  it('names the full tool id, the wait false then await batch pattern and the launch-equals-start rule', () => {
+    const text = textFor(project(config('medium')));
+    expect(DELEGATE_TOOL).toBe('mcp__plugin_subzero_subzero__delegate');
+    expect(text).toContain('mcp__plugin_subzero_subzero__delegate');
+    expect(text).toMatch(/wait: false/);
+    expect(text).toMatch(/one message/);
+    expect(text).toMatch(/await[^\n]*tasks[^\n]*timeout_s: 600/);
+    expect(text).toMatch(/until (every|all)/);
+    expect(text).toMatch(/launch time[^\n]*`started` time/);
+    expect(text).toMatch(/queued[^\n]*not (been )?launched/);
+  });
+
+  it('keeps fork and worktree spawns on the Agent tool', () => {
+    expect(textFor(project(config('medium')))).toMatch(/fork[^\n]*worktree[^\n]*(stay|stays)[^\n]*Agent tool/i);
+  });
+
+  it('tells Claude to pass back only when delegate is refused with no task, and to keep a returned task id', () => {
+    const text = textFor(project(config('medium')));
+    expect(text).toMatch(/refused or[^\n]*tool error[^\n]*no task/);
+    expect(text).toMatch(/description[^\n]*begins? with `passback`/);
+    expect(text).toMatch(/task id[^\n]*stays with subzero[^\n]*even if[^\n]*fails/);
+  });
+
+  it('stays under 3,000 characters with all three tiers', () => {
+    const text = textFor(project(config('small', 'medium', 'large')));
+    expect(text.length).toBeLessThan(3000);
+    for (const t of ['small', 'medium', 'large']) expect(text).toContain(`tier: "${t}"`);
+  });
+
+  it('ignores tiers that carry no tier word', () => {
+    const tiers = wordTiers(routableTiers(project(config('medium', 'cloud'))));
+    expect(tiers.map((t) => t.tier)).toEqual(['medium']);
+  });
+});
+
+describe('routingContext', () => {
+  it('returns nothing with no project root', () => {
+    expect(routingContext(undefined)).toBeUndefined();
+  });
+
+  it('returns nothing when the agent file is missing', () => {
+    expect(routingContext(project())).toBeUndefined();
+  });
+
+  it('AE3: returns nothing with no tiers, with no agents, with a default tier only and without a general entry', () => {
+    expect(routingContext(project('endpoints: {}\n'))).toBeUndefined();
+    expect(routingContext(project(config()))).toBeUndefined();
+    expect(routingContext(project(`models:\n  tiers:\n${tier('default', 'local/d')}`))).toBeUndefined();
+    expect(routingContext(project(`models:\n  tiers:\n${tier('default', 'local/d')}${tier('medium', 'local/m')}agents:\n  helper:\n    description: x\n    tools: [read]\n    timeout: 5\n`))).toBeUndefined();
+  });
+
+  it('returns a one-line warning for a file that exists and fails to load', () => {
+    const text = routingContext(project('agents: [oops\n'));
+    expect(text).toBeDefined();
+    expect(text).not.toContain('\n');
+    expect(text).toMatch(/subzero/i);
+    expect(text).toMatch(/routing is off/i);
+  });
+
+  it('returns the routing text when a routable tier word exists', () => {
+    expect(routingContext(project(config('medium')))).toContain('tier: "medium"');
+  });
+});

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { getAgent, loadAgentFile } from '../../src/config/agent-config.js';
@@ -75,5 +75,76 @@ describe('SessionStart hook', () => {
       env: { ...process.env, CLAUDE_PLUGIN_DATA: data, CLAUDE_PROJECT_DIR: project },
     });
     expect(readParentSessionId(data, project)).toBe('abc-123');
+  });
+});
+
+describe('SessionStart hook routing output', () => {
+  const MEDIUM = `models:
+  tiers:
+    default: { host: pi, model: local/d, thinking: low }
+    medium: { host: pi, model: local/m, thinking: low }
+agents:
+  general:
+    tools: [read]
+    timeout: 60
+`;
+
+  function runHook(project: string | undefined, yaml: string | undefined, input: Record<string, unknown> = {}) {
+    execFileSync(process.execPath, ['build.mjs'], { cwd: REPO });
+    const data = tempDir();
+    if (project !== undefined && yaml !== undefined) {
+      mkdirSync(path.join(project, '.agents'), { recursive: true });
+      writeFileSync(path.join(project, '.agents', 'subzero.yaml'), yaml);
+    }
+    const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_PLUGIN_DATA: data };
+    delete env.CLAUDE_PROJECT_DIR;
+    if (project !== undefined) env.CLAUDE_PROJECT_DIR = project;
+    const stdout = execFileSync(process.execPath, [path.join(REPO, 'dist', 'hook.js')], {
+      input: JSON.stringify({ session_id: 's-1', source: 'startup', ...input }),
+      env,
+    }).toString();
+    return { stdout, data };
+  }
+
+  it('prints the routing text as additionalContext JSON and still records the session id when tiers exist', () => {
+    const project = tempDir();
+    const { stdout, data } = runHook(project, MEDIUM);
+    const out = JSON.parse(stdout) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
+    expect(out.hookSpecificOutput.hookEventName).toBe('SessionStart');
+    expect(out.hookSpecificOutput.additionalContext).toContain('mcp__plugin_subzero_subzero__delegate');
+    expect(out.hookSpecificOutput.additionalContext).toContain('tier: "medium"');
+    expect(out.hookSpecificOutput.additionalContext.length).toBeLessThan(3000);
+    expect(readParentSessionId(data, project)).toBe('s-1');
+  });
+
+  it('AE3: prints nothing when no tiers are configured and still records the session id', () => {
+    const project = tempDir();
+    const { stdout, data } = runHook(project, 'endpoints: {}\n');
+    expect(stdout).toBe('');
+    expect(readParentSessionId(data, project)).toBe('s-1');
+  });
+
+  it('prints nothing for a default tier only and for a project with no agent file', () => {
+    expect(runHook(tempDir(), 'models:\n  tiers:\n    default: { host: pi, model: a/b, thinking: low }\n').stdout).toBe('');
+    expect(runHook(tempDir(), undefined).stdout).toBe('');
+  });
+
+  it('prints a one-line warning as additionalContext for a malformed agent file and exits 0', () => {
+    const { stdout } = runHook(tempDir(), 'agents: [oops\n');
+    const out = JSON.parse(stdout) as { hookSpecificOutput: { additionalContext: string } };
+    expect(out.hookSpecificOutput.additionalContext).not.toContain('\n');
+    expect(out.hookSpecificOutput.additionalContext).toMatch(/routing is off/i);
+  });
+
+  it('prints nothing with no project directory in the environment or the input', () => {
+    expect(runHook(undefined, undefined).stdout).toBe('');
+  });
+
+  it('falls back to the cwd of the input when the environment names no project', () => {
+    const project = tempDir();
+    mkdirSync(path.join(project, '.agents'), { recursive: true });
+    writeFileSync(path.join(project, '.agents', 'subzero.yaml'), MEDIUM);
+    const { stdout } = runHook(undefined, undefined, { cwd: project });
+    expect(JSON.parse(stdout).hookSpecificOutput.additionalContext).toContain('tier: "medium"');
   });
 });
