@@ -1,11 +1,15 @@
 // @sigil implements design/routing-hooks.sigil RoutingHooks
 //
 // The routing logic the hook processes share: the alias table, the generic-spawn
-// test and the routing text. It reaches the core only through AgentConfig and
-// imports no child driver. Entry scripts stay thin; the logic is importable.
-import { existsSync } from 'node:fs';
+// test, the routing text and the deny decision. It reaches the core only through
+// AgentConfig and imports no child driver or server. Entry scripts stay thin; the
+// logic is importable.
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { AGENT_FILE, routableTiers, type RoutableTier } from '../config/agent-config.js';
+import { AGENT_FILE, getRouting, routableTiers, type RoutableTier } from '../config/agent-config.js';
+import { liveReadinessMarkers } from '../mcp/parent-session.js';
 
 /** The delegate tool as Claude Code names it for the plugin. */
 export const DELEGATE_TOOL = 'mcp__plugin_subzero_subzero__delegate';
@@ -103,5 +107,155 @@ export function routingContext(projectRoot: string | undefined): string | undefi
   } catch (err) {
     if ((err as { code?: unknown }).code === 'load_error') return buildWarning((err as Error).message);
     return undefined;
+  }
+}
+
+/** The fields of a PreToolUse Agent input the decision looks at. */
+export interface SpawnInput extends AgentSpawn {
+  /** Set by builds that mark a fork as a flag instead of an agent type. */
+  fork?: boolean;
+}
+
+export interface HookContext {
+  projectRoot: string;
+  dataDir: string;
+  /** The parent session id the hook input carries. */
+  sessionId: string;
+  /** The hook's ancestor pids; the real process tree when left out. */
+  ancestors?: () => Set<number>;
+  now?: () => number;
+}
+
+export type HookDecision = { decision: 'allow' } | { decision: 'deny'; tier: string; reason: string };
+
+const ALLOW: HookDecision = { decision: 'allow' };
+/** A deny memory folder not written for this long is deleted. */
+const DENY_MEMORY_TTL_MS = 7 * 24 * 3600 * 1000;
+const MAX_ANCESTORS = 64;
+
+/**
+ * The pids of this process's ancestors, from its parent up to but excluding init.
+ * Throws when the process table cannot be read, which the decision treats as allow.
+ */
+export function ancestorPids(pid: number = process.pid): Set<number> {
+  const table = execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+  const parents = new Map<number, number>();
+  for (const line of table.split('\n')) {
+    const [child, parent] = line.trim().split(/\s+/).map(Number);
+    if (child !== undefined && parent !== undefined && Number.isInteger(child) && Number.isInteger(parent)) parents.set(child, parent);
+  }
+  if (!parents.has(pid)) throw new Error('the process table does not list this process');
+  const out = new Set<number>();
+  let at = parents.get(pid);
+  while (at !== undefined && at > 1 && !out.has(at) && out.size < MAX_ANCESTORS) {
+    out.add(at);
+    at = parents.get(at);
+  }
+  return out;
+}
+
+const promptHash = (prompt: string): string => createHash('sha256').update(prompt).digest('hex');
+
+function denyRoot(dataDir: string): string {
+  return path.join(dataDir, 'sessions', 'deny');
+}
+
+function denyFolder(dataDir: string, sessionId: string): string {
+  return path.join(denyRoot(dataDir), createHash('sha256').update(sessionId).digest('hex').slice(0, 32));
+}
+
+/** The tier the deny memory kept for a prompt in a session, or undefined. */
+function rememberedTier(dataDir: string, sessionId: string, hash: string): string | undefined {
+  try {
+    const value = JSON.parse(readFileSync(path.join(denyFolder(dataDir, sessionId), hash), 'utf8')) as { tier?: unknown };
+    return typeof value.tier === 'string' ? value.tier : undefined;
+  } catch (err) {
+    if ((err as { code?: unknown }).code === 'ENOENT') return undefined;
+    throw err; // an unreadable store means allow
+  }
+}
+
+/**
+ * Record a denied prompt as its own create-only entry. No entry is read or replaced,
+ * so hook processes of one concurrent batch cannot lose each other's entries. Session
+ * folders not written for seven days are deleted.
+ */
+function remember(dataDir: string, sessionId: string, hash: string, tier: string, now: number): void {
+  const folder = denyFolder(dataDir, sessionId);
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
+  sweepDenyMemory(dataDir, now);
+  try {
+    writeFileSync(path.join(folder, hash), JSON.stringify({ tier }) + '\n', { flag: 'wx', mode: 0o600 });
+  } catch (err) {
+    if ((err as { code?: unknown }).code !== 'EEXIST') throw err;
+  }
+}
+
+function sweepDenyMemory(dataDir: string, now: number): void {
+  const root = denyRoot(dataDir);
+  try {
+    for (const name of readdirSync(root)) {
+      try {
+        const folder = path.join(root, name);
+        if (now - statSync(folder).mtimeMs > DENY_MEMORY_TTL_MS) rmSync(folder, { recursive: true, force: true });
+      } catch {
+        // A folder another process just removed is gone either way.
+      }
+    }
+  } catch {
+    // Nothing to sweep.
+  }
+}
+
+/** The deny reason Claude sees (KTD8, KTD17). */
+export function buildDenyReason(tier: string, prompt: string): string {
+  return [
+    `Send this subagent to subzero instead of the Agent tool: call ${DELEGATE_TOOL} with tier: "${tier}", brief set to this Agent call's prompt unchanged, and wait: false, then collect it with the await tool.`,
+    'This is a routing rule, not an error; do not call Agent again for this subagent and do not change its model.',
+    `Only if ${DELEGATE_TOOL} is refused or returns a tool error and made no task, call Agent again with the prompt unchanged and a short description that begins with \`${PASSBACK_WORD}\`. Once a task id came back the work stays with subzero, even if its result fails.`,
+    `brief:\n${prompt}`,
+  ].join('\n');
+}
+
+function isPassback(description: string | undefined): boolean {
+  return description !== undefined && description.trimStart().startsWith(PASSBACK_WORD);
+}
+
+function allowedByMarker(ctx: HookContext): boolean {
+  const markers = liveReadinessMarkers(ctx.dataDir, ctx.projectRoot);
+  if (markers.length === 0) return false;
+  const ancestors = (ctx.ancestors ?? ancestorPids)();
+  return markers.some((m) => ancestors.has(m.ppid));
+}
+
+/**
+ * Decide one Agent spawn (the flowchart of the plan): deny only a generic spawn the
+ * alias table maps to a routable tier, or a prompt the deny memory holds toward a tier
+ * that is still routable. Any error, missing input or unreadable store allows (R18).
+ */
+export function decideAgentSpawn(spawn: SpawnInput, ctx: HookContext): HookDecision {
+  try {
+    const prompt = spawn.prompt;
+    if (typeof prompt !== 'string' || prompt === '' || ctx.sessionId === '') return ALLOW;
+    if (!getRouting(ctx.projectRoot).hook) return ALLOW;
+    // The hook has no Kernel: every configured tier that a tier word maps to is routable.
+    const routable = new Set(wordTiers(routableTiers(ctx.projectRoot)).map((t) => t.tier));
+    if (routable.size === 0) return ALLOW;
+    if (!allowedByMarker(ctx)) return ALLOW;
+    if (spawn.fork === true || spawn.subagent_type === 'fork') return ALLOW;
+    if (typeof spawn.isolation === 'string' && spawn.isolation !== '') return ALLOW;
+
+    const hash = promptHash(prompt);
+    const kept = rememberedTier(ctx.dataDir, ctx.sessionId, hash);
+    if (kept !== undefined && isPassback(spawn.description)) return ALLOW;
+    if (kept !== undefined && routable.has(kept)) return { decision: 'deny', tier: kept, reason: buildDenyReason(kept, prompt) };
+
+    if (!isGenericSpawn(spawn, getRouting(ctx.projectRoot).genericAgents)) return ALLOW;
+    const tier = aliasTier(spawn.model);
+    if (tier === undefined || !routable.has(tier)) return ALLOW;
+    remember(ctx.dataDir, ctx.sessionId, hash, tier, (ctx.now ?? Date.now)());
+    return { decision: 'deny', tier, reason: buildDenyReason(tier, prompt) };
+  } catch {
+    return ALLOW;
   }
 }

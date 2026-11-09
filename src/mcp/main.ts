@@ -9,7 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { Kernel } from '../kernel/kernel.js';
 import { PI_HOST, PiDriver } from '../pi/driver.js';
 import { DelegationService } from '../service/delegation-service.js';
-import { dataDir, readParentSessionId, setting } from './parent-session.js';
+import { dataDir, readParentSessionId, removeReadinessMarker, setting, writeReadinessMarker } from './parent-session.js';
 import { createSubzeroServer } from './server.js';
 
 const env = { ...process.env };
@@ -32,14 +32,41 @@ const service = new DelegationService({
   },
 });
 const data = dataDir(env);
+
+// The readiness marker says to the PreToolUse hook that this server can serve its
+// project: written once the project root resolves, removed on exit. A killed server
+// leaves a marker whose pid is dead, which counts as absent.
+let markedRoot: string | undefined;
+function markReady(): void {
+  const root = service.projectRoot;
+  if (root === undefined || markedRoot !== undefined) return;
+  try {
+    writeReadinessMarker(data, root, process.pid, process.ppid);
+    markedRoot = root;
+  } catch {
+    // Without a marker the hook lets every spawn through, which is the safe side.
+  }
+}
+process.on('exit', () => {
+  if (markedRoot === undefined) return;
+  try {
+    removeReadinessMarker(data, markedRoot, process.pid);
+  } catch {
+    // A marker left behind names a dead pid and counts as absent.
+  }
+});
+
 server = createSubzeroServer({
   service,
-  parentSessionId: () => readParentSessionId(data, service.projectRoot),
+  parentSessionId: () => {
+    markReady(); // a root that resolved later, through a reported root, is marked on the next call
+    return readParentSessionId(data, service.projectRoot);
+  },
 });
 
 // Start-up goes through the service so the start-up sweep runs; when no root
 // resolves yet, each later call tries again and reports the error.
-server.oninitialized = () => void service.start().catch(() => undefined);
+server.oninitialized = () => void service.start().then(markReady, () => undefined);
 
 let closing = false;
 async function shutdown(): Promise<void> {

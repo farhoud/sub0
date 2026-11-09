@@ -117,6 +117,11 @@ agents:
     expect(readParentSessionId(data, project)).toBe('s-1');
   });
 
+  it('R15: still prints the routing text with routing.hook false', () => {
+    const { stdout } = runHook(tempDir(), `routing:\n  hook: false\n${MEDIUM}`);
+    expect(JSON.parse(stdout).hookSpecificOutput.additionalContext).toContain('tier: "medium"');
+  });
+
   it('AE3: prints nothing when no tiers are configured and still records the session id', () => {
     const project = tempDir();
     const { stdout, data } = runHook(project, 'endpoints: {}\n');

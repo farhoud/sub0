@@ -4,6 +4,7 @@ import { build } from 'esbuild';
 const entries = {
   server: 'src/mcp/main.ts',
   hook: 'src/mcp/session-hook.ts',
+  'agent-hook': 'src/routing/agent-hook.ts',
   cli: 'src/cli/main.ts',
 };
 
