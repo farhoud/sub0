@@ -127,8 +127,10 @@ component PiDriver {
     to five seconds, then close stdin, then send SIGTERM and then SIGKILL to the
     process group. No process of the group may remain, including a grandchild.
 
-    The driver must not detach or unref a child run. When the server dies, stdin of
-    the child run is closed and pi must exit, so no process of a child run may
+    The driver must not unref a child run or let it outlive the server: the child
+    run starts as the leader of its own process group only so that the whole group
+    can be killed, and it keeps the pipes of its stdio. When the server dies, stdin
+    of the child run is closed and pi must exit, so no process of a child run may
     outlive Esc, a timeout or the end of the Claude session.
 
     When ~/.pi/agent/SYSTEM.md exists, the driver must record a warning as a

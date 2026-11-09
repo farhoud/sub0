@@ -31,8 +31,12 @@ component McpServer {
   state {
     The server knows the parent session id of the current conversation. The
     *SessionStart hook* of the plugin records it, so that listing can be limited to
-    this conversation even after /clear. When the server does not yet know it, a
-    delegation carries none.
+    this conversation even after /clear. The hook records one entry for each
+    session id together with its own ancestor processes, and the server takes the
+    newest entry whose ancestors include the Claude Code process that started the
+    server, so two sessions in one project never take each other's id, and a
+    session of another process is never matched. When the server does not yet know
+    it, or no entry names its own parent process, a delegation carries none.
 
     A *progress notification* carries a counter that rises with each notification
     and one *message line*, and no total. The message line names the agent, the
@@ -63,7 +67,7 @@ component McpServer {
     ```
 
     The *plugin data folder* is the folder that Claude Code gives the plugin for
-    its own files. It holds the recorded parent session id of each project.
+    its own files. It holds the recorded parent session id of each session of each project.
   }
 
   logic {

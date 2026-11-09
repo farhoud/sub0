@@ -135,7 +135,12 @@ component RoutingHooks {
 
     An Agent spawn that asks for a fork or sets isolation must always be
     allowed, before the deny memory is read, because a subzero child starts in
-    the shared checkout and sees only its brief text.
+    the shared checkout and sees only its brief text. A fork is a spawn whose
+    agent type is fork, and any isolation value that is not empty counts, such as
+    worktree or remote, including a value this design does not know, because
+    subzero can honor no isolated spawn. These are the shapes that Claude Code's
+    Agent tool shows today and are an assumption that the acceptance run checks
+    against a real hook input.
 
     A pass-back whose prompt the deny memory of its parent session id holds must
     always be allowed, before the deny memory can deny it, so that a subagent whose
