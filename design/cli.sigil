@@ -89,7 +89,8 @@ component Cli {
     owner abandoned. It must also be refused with a message that no launch spec
     was recorded when the task record has none.
 
-    Cli depends on DelegationService for the delegation, on TaskStore for the
+    Cli depends on DelegationService for the delegation, the status line and
+    the result text that it prints, on TaskStore for the
     task record, on TaskCore for the launch spec, the attach command and the
     session export, on AgentConfig for the agent file, the starter entries and the
     errors it shows, and on the driver registry of Kernel for the child driver of a

@@ -1,5 +1,5 @@
 @design/delegation-service.sigil from DelegationService import {
-    delegation, brief text, queue place, queued task,
+    delegation, brief text, queue place, queued task, status line, result text,
 }
 @design/kernel.sigil from Kernel import {
   parent adapter, supported host, entry point,
@@ -53,18 +53,14 @@ component McpServer {
     DelegationService derives,
     never as started.
 
-    A *status line* reports a task that has no result yet. For a queued task of
-    this process it gives the model endpoint, the queue place and the time
-    waited since the enqueue time, and for a queued task of another process it
-    gives the model endpoint and the time waited with no queue place:
-    ```text
-    queued, not launched yet: no child is running; it starts when endpoint <e> has room (place <n> in this session's queue, waiting <elapsed>)
-    ```
-    For a task whose child run has a start time the status line gives that
-    start time and how long ago it was:
-    ```text
-    running, started <iso> (<elapsed> ago)
-    ```
+    Each reply about a task that has no result gives its status line and each
+    reply about a settled task gives its result text, worded by
+    DelegationService, so that a queued task of this process names the model
+    endpoint, the queue place and the time waited, a queued task of another
+    process names the model endpoint and the time waited with no queue place, and
+    a task whose child run has a start time gives that start time. McpServer adds
+    only what is its own: the bound, the equal share, the listing cap and the
+    progress notification.
 
     The *plugin data folder* is the folder that Claude Code gives the plugin for
     its own files. It holds the recorded parent session id of each session of
@@ -179,9 +175,10 @@ component McpServer {
     prompt in the main session, and under dontAsk it is denied and the subagent
     sees the denial.
 
-    McpServer depends on DelegationService for the delegation and the
-    queue place, and on AgentConfig for the unknown agent error, the tier error
-    and the routable tier names, and on Kernel to list the supported hosts, and
+    McpServer depends on DelegationService for the delegation, the
+    queue place, the status line and the result text, and on AgentConfig for
+    the unknown agent error, the tier error and the routable tier names, and on
+    Kernel to list the supported hosts, and
     on RoutingHooks for what the SessionStart hook adds to Claude's context after
     it records the parent session id, and it must not depend on any particular
     child driver.

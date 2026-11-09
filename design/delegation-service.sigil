@@ -38,6 +38,26 @@ component DelegationService {
     The *queue place* of a child run whose child run state is Pending is its
     position, counted from 1, among the Pending child runs of its
     model endpoint in this process, in the order they arrived.
+
+    A *status line* reports a task that has no result yet. For a queued task of
+    this process it gives the model endpoint, the queue place and the time
+    waited since the enqueue time, and for a queued task of another process it
+    gives the model endpoint and the time waited with no queue place:
+    ```text
+    queued, not launched yet: no child is running; it starts when endpoint <e> has room (place <n> in this session's queue, waiting <elapsed>)
+    ```
+    For a task whose child run has a start time the status line gives that
+    start time and how long ago it was:
+    ```text
+    running, started <iso> (<elapsed> ago)
+    ```
+
+    The *result text* of a settled task starts with a line that holds the task
+    id first, then the agent, the task status and the failure kind when there is
+    one. Lines follow for the message when there is one, the summary, with
+    (empty) for an empty summary, and the usage with the duration when
+    the result holds usage. A notice goes on the line after the first one, so
+    the task id still comes first.
   }
 
   logic {
@@ -242,6 +262,9 @@ component DelegationService {
 
     Report each queued task by its model endpoint, by its queue place when it is a
     task of this process, and by the time it has waited, and never as started.
+    Give every front end the same wording for it, the status line of a task that
+    has no result and the result text of a settled task, so that no front end
+    words the state of a task for itself.
 
     Offer each domain event of the child run of a waited delegation to the caller
     as it happens.
@@ -285,5 +308,14 @@ component DelegationService {
     frozen definition with its model is the proof that the work was routed. The
     queue place is counted per process because the parallel limit is, so it
     names the place in this session's queue only.
+
+    The status line and the result text live here, and not in a front end, because
+    this component is the one owner of the state of a task: the wording of that
+    state is shared by every front end, and a front end that imported it from
+    another front end would depend on a parent adapter, which the Kernel forbids
+    of every core service, the command line included. The queued view is
+    derived here, so its wording sits beside it. Bounding a reply, sharing the
+    tool result limit and ordering a listing stay with the front end that needs
+    them.
   }
 }
