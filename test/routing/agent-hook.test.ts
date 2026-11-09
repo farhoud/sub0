@@ -81,6 +81,14 @@ describe('decideAgentSpawn', () => {
     expect(decideAgentSpawn(spawnOf('q', { model: 'sonnet', isolation: 'worktree' }), ctx()).decision).toBe('allow');
   });
 
+  it('allows a remote-isolated spawn, and treats a fork flag without the fork agent type as a generic spawn', () => {
+    const { ctx } = setup(config(['medium']));
+    expect(decideAgentSpawn(spawnOf('r', { model: 'sonnet', isolation: 'remote' }), ctx()).decision).toBe('allow');
+    expect(decideAgentSpawn(spawnOf('s', { model: 'sonnet', isolation: '' }), ctx()).decision).toBe('deny');
+    const flagged = { ...spawnOf('t', { model: 'sonnet' }), fork: true } as SpawnInput;
+    expect(decideAgentSpawn(flagged, ctx()).decision).toBe('deny');
+  });
+
   it('AE8: after a denied sonnet spawn the same prompt is denied with no model and with haiku; a different prompt with haiku is allowed', () => {
     const { ctx } = setup(config(['medium']));
     const first = decideAgentSpawn(spawnOf('same', { model: 'sonnet' }), ctx());
@@ -352,6 +360,19 @@ describe('built PreToolUse hook', () => {
       env: { ...env(root, data), CLAUDE_PROJECT_DIR: '' },
     }).toString();
     expect(noProject).toBe('');
+  });
+
+  it('resolves the project only from CLAUDE_PROJECT_DIR: the input cwd is not a fallback', () => {
+    const root = project(config(['medium']));
+    const data = tempDir();
+    writeReadinessMarker(data, root, process.pid, process.pid);
+    const stdin = JSON.stringify({ session_id: 's-1', cwd: root, tool_name: 'Agent', tool_input: { prompt: 'x', model: 'sonnet' } });
+    const e = env(root, data);
+    expect(JSON.parse(run(root, data, stdin)).hookSpecificOutput.permissionDecision).toBe('deny');
+    delete e.CLAUDE_PROJECT_DIR;
+    expect(execFileSync(process.execPath, [HOOK], { input: stdin, env: e }).toString()).toBe('');
+    e.CLAUDE_PROJECT_DIR = '${CLAUDE_PROJECT_DIR}';
+    expect(execFileSync(process.execPath, [HOOK], { input: stdin, env: e }).toString()).toBe('');
   });
 
   it('denies six distinct prompts from six concurrent hook processes, and all six again on retry', async () => {

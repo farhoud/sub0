@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { getAgent, loadAgentFile } from '../../src/config/agent-config.js';
@@ -74,7 +74,7 @@ describe('SessionStart hook', () => {
       input: JSON.stringify({ session_id: 'abc-123', cwd: project, source: 'startup' }),
       env: { ...process.env, CLAUDE_PLUGIN_DATA: data, CLAUDE_PROJECT_DIR: project },
     });
-    expect(readParentSessionId(data, project)).toBe('abc-123');
+    expect(readParentSessionId(data, project, process.pid)).toBe('abc-123');
   });
 });
 
@@ -114,7 +114,7 @@ agents:
     expect(out.hookSpecificOutput.additionalContext).toContain('mcp__plugin_subzero_subzero__delegate');
     expect(out.hookSpecificOutput.additionalContext).toContain('tier: "medium"');
     expect(out.hookSpecificOutput.additionalContext.length).toBeLessThan(3000);
-    expect(readParentSessionId(data, project)).toBe('s-1');
+    expect(readParentSessionId(data, project, process.pid)).toBe('s-1');
   });
 
   it('R15: still prints the routing text with routing.hook false', () => {
@@ -126,7 +126,7 @@ agents:
     const project = tempDir();
     const { stdout, data } = runHook(project, 'endpoints: {}\n');
     expect(stdout).toBe('');
-    expect(readParentSessionId(data, project)).toBe('s-1');
+    expect(readParentSessionId(data, project, process.pid)).toBe('s-1');
   });
 
   it('prints nothing for a default tier only and for a project with no agent file', () => {
@@ -145,11 +145,13 @@ agents:
     expect(runHook(undefined, undefined).stdout).toBe('');
   });
 
-  it('falls back to the cwd of the input when the environment names no project', () => {
+  it('does not fall back to the cwd of the input: with CLAUDE_PROJECT_DIR unset it prints nothing and records no session id', () => {
     const project = tempDir();
     mkdirSync(path.join(project, '.agents'), { recursive: true });
     writeFileSync(path.join(project, '.agents', 'subzero.yaml'), MEDIUM);
-    const { stdout } = runHook(undefined, undefined, { cwd: project });
-    expect(JSON.parse(stdout).hookSpecificOutput.additionalContext).toContain('tier: "medium"');
+    const { stdout, data } = runHook(undefined, undefined, { cwd: project });
+    expect(stdout).toBe('');
+    expect(readParentSessionId(data, project, process.pid)).toBeUndefined();
+    expect(existsSync(path.join(data, 'sessions'))).toBe(false);
   });
 });

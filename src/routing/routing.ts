@@ -111,10 +111,7 @@ export function routingContext(projectRoot: string | undefined): string | undefi
 }
 
 /** The fields of a PreToolUse Agent input the decision looks at. */
-export interface SpawnInput extends AgentSpawn {
-  /** Set by builds that mark a fork as a flag instead of an agent type. */
-  fork?: boolean;
-}
+export type SpawnInput = AgentSpawn;
 
 export interface HookContext {
   projectRoot: string;
@@ -244,7 +241,9 @@ export function decideAgentSpawn(spawn: SpawnInput, ctx: HookContext): HookDecis
     const routable = new Set(wordTiers(routableTiers(ctx.projectRoot)).map((t) => t.tier));
     if (routable.size === 0) return ALLOW;
     if (!allowedByMarker(ctx)) return ALLOW;
-    if (spawn.fork === true || spawn.subagent_type === 'fork') return ALLOW;
+    // A fork is an agent type; any non-empty isolation (worktree, remote, unknown) allows,
+    // because subzero can honor no isolated spawn.
+    if (spawn.subagent_type === 'fork') return ALLOW;
     if (typeof spawn.isolation === 'string' && spawn.isolation !== '') return ALLOW;
 
     const hash = promptHash(prompt);

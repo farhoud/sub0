@@ -60,7 +60,7 @@ server = createSubzeroServer({
   service,
   parentSessionId: () => {
     markReady(); // a root that resolved later, through a reported root, is marked on the next call
-    return readParentSessionId(data, service.projectRoot);
+    return readParentSessionId(data, service.projectRoot, process.ppid);
   },
 });
 

@@ -15,9 +15,9 @@ async function readStdin(): Promise<string> {
 
 let output = '';
 try {
-  const input = JSON.parse(await readStdin()) as { session_id?: unknown; cwd?: unknown; tool_input?: unknown };
-  const cwd = typeof input.cwd === 'string' ? input.cwd : undefined;
-  const project = setting(process.env.CLAUDE_PROJECT_DIR) ?? cwd;
+  const input = JSON.parse(await readStdin()) as { session_id?: unknown; tool_input?: unknown };
+  // Only CLAUDE_PROJECT_DIR names the project, the source of the server's SUBZERO_PROJECT_DIR.
+  const project = setting(process.env.CLAUDE_PROJECT_DIR);
   if (typeof input.session_id === 'string' && project && typeof input.tool_input === 'object' && input.tool_input !== null) {
     const decision = decideAgentSpawn(input.tool_input as SpawnInput, {
       projectRoot: realpathSync(project),
