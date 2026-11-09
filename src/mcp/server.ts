@@ -4,7 +4,7 @@
 // names them mcp__plugin_subzero_subzero__<tool>.
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { LoadError, UnknownAgentError, UnresolvedRootError } from '../config/agent-config.js';
+import { LoadError, TierError, UnknownAgentError, UnresolvedRootError } from '../config/agent-config.js';
 import { isTaskId } from '../core/ids.js';
 import { EmptyBriefError, type CollectReply, type DelegationService } from '../service/delegation-service.js';
 import { bound, formatListing, formatResult } from './format.js';
@@ -81,7 +81,7 @@ function toolError(err: unknown): CallToolResult {
       true,
     );
   }
-  if (err instanceof UnknownAgentError || err instanceof LoadError || err instanceof EmptyBriefError) {
+  if (err instanceof UnknownAgentError || err instanceof TierError || err instanceof LoadError || err instanceof EmptyBriefError) {
     return text(err.message, true);
   }
   return text(`subzero failed: ${(err as Error)?.message ?? String(err)}`, true);

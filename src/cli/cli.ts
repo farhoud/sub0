@@ -1,6 +1,8 @@
 // @sigil implements design/cli.sigil Cli
 //
-//   subzero run <agent> <brief...>   delegate, wait and print the result
+//   subzero init <model> [--host H] [--timeout S] [--thinking L]
+//                                    add the default tier, general and fallback entries
+//   subzero run [--agent A] <brief...>  delegate, wait and print the result (no --agent: general)
 //   subzero tasks                    list every task
 //   subzero attach <task id>         reopen the child session in the pi terminal interface
 //   subzero show <task id> [-o file] export the child session as HTML
@@ -11,7 +13,17 @@
 // Kernel it passes in, and attach and show ask that registry.
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { LoadError, UnknownAgentError, UnresolvedRootError } from '../config/agent-config.js';
+import { parseArgs } from 'node:util';
+import {
+  addStarterEntries,
+  LoadError,
+  StarterHostConflictError,
+  THINKING_LEVELS,
+  TierError,
+  UnknownAgentError,
+  UnresolvedRootError,
+  type ThinkingLevel,
+} from '../config/agent-config.js';
 import { isTaskId } from '../core/ids.js';
 import { formatResult } from '../mcp/format.js';
 import { describeEvent } from '../mcp/progress.js';
@@ -24,7 +36,8 @@ export interface CliIo {
 }
 
 const USAGE = `usage:
-  subzero run <agent> <brief...>
+  subzero init <model> [--host <host>] [--timeout <seconds>] [--thinking <level>]
+  subzero run [--agent <agent>] <brief...>
   subzero tasks
   subzero attach <task id>
   subzero show <task id> [-o <file.html>]`;
@@ -32,6 +45,8 @@ const USAGE = `usage:
 function knownError(err: unknown): boolean {
   return (
     err instanceof UnknownAgentError ||
+    err instanceof TierError ||
+    err instanceof StarterHostConflictError ||
     err instanceof LoadError ||
     err instanceof UnresolvedRootError ||
     err instanceof EmptyBriefError ||
@@ -49,6 +64,8 @@ export async function runCli(argv: string[], io: CliIo, options: CliOptions): Pr
   try {
     await service.start();
     switch (command) {
+      case 'init':
+        return await init(service, rest, io, options);
       case 'run':
         return await run(service, rest, io);
       case 'tasks':
@@ -70,19 +87,88 @@ export async function runCli(argv: string[], io: CliIo, options: CliOptions): Pr
   }
 }
 
-async function run(service: DelegationService, args: string[], io: CliIo): Promise<number> {
-  const [agent, ...words] = args;
-  if (agent === undefined || words.length === 0) {
+const DEFAULT_INIT_TIMEOUT = 1200;
+const DEFAULT_INIT_THINKING: ThinkingLevel = 'medium';
+
+async function init(service: DelegationService, args: string[], io: CliIo, options: CliOptions): Promise<number> {
+  const parsed = parseNamed(args, { host: { type: 'string' }, timeout: { type: 'string' }, thinking: { type: 'string' } });
+  const [model, ...extra] = parsed?.positionals ?? [];
+  if (parsed === null || model === undefined || model === '' || extra.length > 0) {
     io.err(USAGE);
     return 2;
   }
+  const { host: hostOption, timeout: timeoutOption, thinking: thinkingOption } = parsed.values;
+  const timeout = timeoutOption === undefined ? DEFAULT_INIT_TIMEOUT : Number(timeoutOption);
+  if (timeoutOption !== undefined && (timeoutOption.trim() === '' || !(timeout > 0))) {
+    io.err(`subzero: --timeout must be a positive number of seconds (got "${timeoutOption}")`);
+    return 2;
+  }
+  const thinking = thinkingOption ?? DEFAULT_INIT_THINKING;
+  if (!(THINKING_LEVELS as readonly string[]).includes(thinking)) {
+    io.err(`subzero: --thinking must be one of ${THINKING_LEVELS.join(', ')} (got "${thinking}")`);
+    return 2;
+  }
+
+  const supported = options.kernel.supportedHosts();
+  if (supported.length === 0) {
+    io.err('subzero: no host is registered, so init has no host to write the starter entries for');
+    return 1;
+  }
+  const host = hostOption ?? (supported.length === 1 ? supported[0] : undefined);
+  if (host === undefined || !supported.includes(host)) {
+    const which = host === undefined ? 'the --host option is needed' : `the host "${host}" is not supported`;
+    io.err(`subzero: ${which} when init has these supported hosts to choose from: ${supported.join(', ')}`);
+    return 1;
+  }
+  const tools = options.kernel.starterTools(host);
+  if (tools === undefined) {
+    io.err(`subzero: the child driver of the host "${host}" offers no starter tools, so init cannot write the agent entries`);
+    return 1;
+  }
+
+  const result = addStarterEntries(service.projectRoot!, {
+    host,
+    model,
+    thinking: thinking as ThinkingLevel,
+    timeout,
+    generalTools: tools.general,
+    fallbackTools: tools.fallback,
+  });
+  const name = (entry: string) => (entry === 'default' ? 'the default tier' : `the ${entry} agent`);
+  if (result.added.length === 0) {
+    io.out('all three entries (the default tier, the general agent and the fallback agent) are already there; nothing changed');
+    return 0;
+  }
+  io.out(`added ${result.added.map(name).join(', ')}`);
+  if (result.present.length > 0) io.out(`already there: ${result.present.map(name).join(', ')}`);
+  return 0;
+}
+
+/** Parse named options and positionals; null means the arguments are not valid. */
+function parseNamed<T extends Record<string, { type: 'string' }>>(args: string[], options: T) {
+  try {
+    return parseArgs({ args, options, allowPositionals: true, strict: true });
+  } catch {
+    return null;
+  }
+}
+
+async function run(service: DelegationService, args: string[], io: CliIo): Promise<number> {
+  // The agent is a named option, so a lone argument is always the brief.
+  const parsed = parseNamed(args, { agent: { type: 'string' } });
+  if (parsed === null || parsed.positionals.length === 0) {
+    io.err(USAGE);
+    return 2;
+  }
+  const { agent } = parsed.values;
+  const words = parsed.positionals;
   // Ctrl-C cancels the child run; the command line has no other cancel.
   const abort = new AbortController();
   const onSigint = () => abort.abort();
   process.on('SIGINT', onSigint);
   try {
     const reply = await service.delegate(
-      { agent, briefText: words.join(' ') },
+      { ...(agent !== undefined ? { agent } : {}), briefText: words.join(' ') },
       {
         wait: true,
         signal: abort.signal,

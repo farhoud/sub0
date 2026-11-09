@@ -102,7 +102,7 @@ Deno.test("a harness error still yields a failed row instead of dropping the pas
 Deno.test("stages B-control on the evaluator's Claude model", async () => {
   const { out } = await pass("B-control", "report");
   const yaml = readFileSync(join(out, "pass", ".agents", "subzero.yaml"), "utf8");
-  ok(/sigil-interpreter-control:[\s\S]*?model: anthropic\/claude-sonnet-5-5/.test(yaml));
+  ok(/\n    control:[\s\S]*?model: anthropic\/claude-sonnet-5-5/.test(yaml));
 });
 
 Deno.test("a run without the evaluator's report is kept as a failed row, never dropped", async () => {

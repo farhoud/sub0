@@ -18,7 +18,8 @@ import { TaskStore, type TaskStoreOptions, type TaskView } from '../store/task-s
 
 /** The request of a front end. */
 export interface Delegation {
-  agent: string;
+  /** The agent entry to run; none runs `general`. */
+  agent?: string;
   briefText: string;
   files?: string[];
   expectedOutput?: string;
@@ -172,14 +173,16 @@ export class DelegationService {
   }
 
   /**
-   * Turn a named agent and a brief into a task. Throws the unresolved root error,
-   * EmptyBriefError, the load error or the unknown agent error with no task made.
+   * Turn an agent and a brief into a task. Throws the unresolved root error,
+   * EmptyBriefError, the load error, the unknown agent error or the tier error with no task made.
    */
   async delegate(delegation: Delegation, options: DelegateOptions): Promise<DelegateReply> {
     const { projectRoot, core } = await this.connect();
     if (delegation.briefText.trim() === '') throw new EmptyBriefError();
-    const agent: AgentDefinition = getAgent(projectRoot, delegation.agent);
-    // The registry refuses a host with no child driver, naming it, before any task exists.
+    // The host of the definition comes from its tier; the registry's hosts are the only ones that run.
+    const agent: AgentDefinition = getAgent(projectRoot, delegation.agent, {
+      supportedHosts: this.options.kernel.supportedHosts(),
+    });
     const port = this.options.kernel.childPort(agent.host);
 
     const task = core.start({

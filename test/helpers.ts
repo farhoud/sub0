@@ -20,28 +20,26 @@ skills:
 endpoints:
   local:
     parallel: 1
+models:
+  tiers:
+    default: { host: pi, model: local/qwen, thinking: high }
+    small: { host: pi, model: local/qwen-small, thinking: low }
+    cloud: { host: pi, model: cloud/model, thinking: low }
 agents:
   helper:
     description: A test helper
-    host: pi
-    model: local/qwen
-    thinking: high
     skills: [alpha, beta]
     tools: [read, write]
     timeout: 30
   other:
     description: Another helper on the same endpoint
-    host: pi
-    model: local/qwen-small
-    thinking: low
+    tier: small
     skills: [alpha]
     tools: [read]
     timeout: 30
   free:
     description: An agent on an endpoint with no entry
-    host: pi
-    model: cloud/model
-    thinking: low
+    tier: cloud
     skills: []
     tools: [read]
     timeout: 30

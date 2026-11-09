@@ -1,12 +1,12 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { LoadError, UnknownAgentError, UnresolvedRootError } from '../../src/config/agent-config.js';
+import { LoadError, TierError, UnknownAgentError, UnresolvedRootError } from '../../src/config/agent-config.js';
 import { unavailableUsage, type ChildOutcome, type ChildPort } from '../../src/core/types.js';
 import { DelegationService, EmptyBriefError, renderBrief } from '../../src/service/delegation-service.js';
 import { TaskStore } from '../../src/store/task-store.js';
 import { Kernel } from '../../src/kernel/kernel.js';
-import { FAKE_PI_COMMAND, fakePiEnv, isAlive, kernelWithPort, makeProject, piKernel, tempDir, until } from '../helpers.js';
+import { DEFAULT_YAML, FAKE_PI_COMMAND, fakePiEnv, isAlive, kernelWithPort, makeProject, piKernel, tempDir, until } from '../helpers.js';
 
 /** A child port that the test settles by hand, recording each start. */
 function manualPort() {
@@ -239,6 +239,35 @@ describe('DelegationService', () => {
     const svc = new DelegationService({ env: { SUBZERO_PROJECT_DIR: root }, warn: () => {}, kernel });
     await expect(svc.delegate({ agent: 'helper', briefText: 'go' }, { wait: false })).rejects.toThrow(/"pi".*supported hosts: \(none\)/s);
     expect(await svc.list()).toEqual([]);
+    expect(indexLines(root)).toEqual([]);
+  });
+  it('freezes the definition resolved at the tier of the agent, with its host from the tier', async () => {
+    const root = makeProject();
+    const { port } = manualPort();
+    const frozen: any[] = [];
+    const svc = service(root, { start: (request, onEvent) => (frozen.push(request.agent), port.start(request, onEvent)) });
+    await svc.delegate({ agent: 'other', briefText: 'go' }, { wait: false });
+    expect(frozen[0]).toMatchObject({ name: 'other', host: 'pi', model: 'local/qwen-small', thinking: 'low', endpoint: 'local', parallel: 1 });
+  });
+
+  it('runs general when no agent is named, and returns the unknown agent error without a general entry', async () => {
+    const withGeneral = makeProject(DEFAULT_YAML + '  general:\n    tools: [read, write]\n    timeout: 9\n');
+    const frozen: any[] = [];
+    const { port } = manualPort();
+    const svc = service(withGeneral, { start: (request, onEvent) => (frozen.push(request.agent), port.start(request, onEvent)) });
+    await svc.delegate({ briefText: 'go' }, { wait: false });
+    expect(frozen[0]).toMatchObject({ name: 'general', model: 'local/qwen', tools: ['read', 'write'], timeout: 9 });
+
+    const bare = service(makeProject(), manualPort().port);
+    await expect(bare.delegate({ briefText: 'go' }, { wait: false })).rejects.toThrow(/no agent was named/);
+  });
+
+  it('returns the tier error, naming the host and the supported hosts, when the tier host has no driver, and makes no task', async () => {
+    const root = makeProject(DEFAULT_YAML.replace('cloud: { host: pi,', 'cloud: { host: claude,'));
+    const svc = service(root, manualPort().port);
+    const err = await svc.delegate({ agent: 'free', briefText: 'go' }, { wait: false }).catch((e) => e);
+    expect(err).toBeInstanceOf(TierError);
+    expect(err.message).toMatch(/"cloud".*"claude".*supported hosts: pi/s);
     expect(indexLines(root)).toEqual([]);
   });
 });

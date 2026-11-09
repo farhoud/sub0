@@ -13,12 +13,27 @@ endpoints:
   r9700:
     parallel: 1
 
+# What runs a child lives here and never in an agent: host, model and thinking.
+models:
+  tiers:
+    default:
+      host: pi
+      model: r9700/Qwen3.8
+      thinking: high
+    low:
+      host: pi
+      model: r9700/Qwen3.8
+      thinking: low
+    control:
+      # Must be the Claude model that the interpreters of arm A use, which is the
+      # evaluator's model. Requires pi to be logged into Anthropic.
+      host: pi
+      model: anthropic/claude-sonnet-5-5
+      thinking: high
+
 agents:
   sigil-interpreter:
     description: Reads one prepared sigilc request and writes its claim rows to the answer file the brief names.
-    host: pi
-    model: r9700/Qwen3.8
-    thinking: high
     skills: [sigil-understand, sigil-egglog]
     # Drop grep and find here if they fail under pi's offline mode.
     tools: [read, grep, find, ls, write]
@@ -26,20 +41,14 @@ agents:
 
   sigil-interpreter-low:
     description: sigil-interpreter at the thinking level low, for experiment arm B-low.
-    host: pi
-    model: r9700/Qwen3.8
-    thinking: low
+    tier: low
     skills: [sigil-understand, sigil-egglog]
     tools: [read, grep, find, ls, write]
     timeout: 1800
 
   sigil-interpreter-control:
-    # Must be the Claude model that the interpreters of arm A use, which is the
-    # evaluator's model. Requires pi to be logged into Anthropic.
     description: sigil-interpreter on the Claude model of arm A's interpreters, for experiment arm B-control.
-    host: pi
-    model: anthropic/claude-sonnet-5-5
-    thinking: high
+    tier: control
     skills: [sigil-understand, sigil-egglog]
     tools: [read, grep, find, ls, write]
     timeout: 1800

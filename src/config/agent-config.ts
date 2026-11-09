@@ -1,12 +1,14 @@
 // @sigil implements design/agent-config.sigil AgentConfig
 //
-// Loads .agents/subzero.yaml under a project root that the caller hands over, and
-// resolves that project root for DelegationService. Nothing here is cached: every
-// call reads the agent file again.
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+// Loads .agents/subzero.yaml under a project root that the caller hands over, resolves
+// an agent entry at one model tier into an agent definition, writes the starter
+// entries for `subzero init`, and resolves that project root for DelegationService.
+// Nothing here is cached: every call reads the agent file again. AgentConfig names no
+// host: the supported hosts come from the caller, and none given means no host check.
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parse as parseYaml } from 'yaml';
+import { isMap, parse as parseYaml, parseDocument, stringify as stringifyYaml, type Document } from 'yaml';
 import { z } from 'zod';
 
 export const AGENT_FILE = path.join('.agents', 'subzero.yaml');
@@ -14,16 +16,45 @@ export const AGENT_FILE = path.join('.agents', 'subzero.yaml');
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
+export const DEFAULT_TIER = 'default';
+export const GENERAL_AGENT = 'general';
+export const FALLBACK_AGENT = 'fallback';
+
 export interface SkillRef {
   name: string;
   /** Absolute path, resolved against the directory of the agent file. May not exist. */
   folder: string;
 }
 
-export interface AgentDefinition {
+/** What runs a child: one entry of `models.tiers`. */
+export interface ModelTier {
+  host: string;
+  model: string;
+  thinking: ThinkingLevel;
+}
+
+/** One agent entry of `agents:`, before it is resolved at a tier. */
+export interface AgentEntry {
   name: string;
-  description: string;
-  host: 'pi';
+  /** Absent on `general` and `fallback`. */
+  description?: string;
+  skills: SkillRef[];
+  tools: string[];
+  /** Seconds from spawn to settlement; time spent Pending does not count. */
+  timeout: number;
+  /** The entry's own tier, when it names one. */
+  tier?: string;
+  /** Per-tier overrides of host, model and thinking, for this agent only. */
+  overrides: Map<string, Partial<ModelTier>>;
+}
+
+/** One agent entry resolved at one model tier. */
+export interface AgentDefinition {
+  /** The entry's name, or `<entry>:<tier>` when the request named a tier. */
+  name: string;
+  /** Absent on `general` and `fallback`. */
+  description?: string;
+  host: string;
   model: string;
   thinking: ThinkingLevel;
   skills: SkillRef[];
@@ -36,28 +67,99 @@ export interface AgentDefinition {
   parallel: number | null;
 }
 
+export interface RoutingSettings {
+  /** On unless the agent file sets it to false. */
+  hook: boolean;
+  /** Agent types the hook treats as generic; undefined means the hook's own list. */
+  genericAgents?: string[];
+}
+
 export interface AgentCatalog {
   agentFile: string;
-  agents: Map<string, AgentDefinition>;
+  entries: Map<string, AgentEntry>;
+  tiers: Map<string, ModelTier>;
+  routing: RoutingSettings;
+  limits: Map<string, number>;
+}
+
+/** What the callers that check hosts pass in; none means no host is checked. */
+export interface ResolveOptions {
+  supportedHosts?: string[];
+  /** The model tier the request names. */
+  tier?: string;
+}
+
+export interface RoutableTier extends ModelTier {
+  tier: string;
 }
 
 export class LoadError extends Error {
-  readonly code = 'load_error';
+  readonly code: string = 'load_error';
   constructor(message: string) {
     super(message);
     this.name = 'LoadError';
   }
 }
 
+/** The one load error that `init` repairs by adding the default tier. */
+export class MissingDefaultTierError extends LoadError {
+  constructor() {
+    super('the default tier is required in models.tiers when agents holds an entry');
+    this.name = 'MissingDefaultTierError';
+  }
+}
+
 export class UnknownAgentError extends Error {
   readonly code = 'unknown_agent';
   constructor(
-    readonly agent: string,
+    /** Undefined when the request named no agent. */
+    readonly agent: string | undefined,
     readonly configured: string[],
   ) {
     const list = configured.length > 0 ? configured.join(', ') : '(none)';
-    super(`unknown agent "${agent}"; configured agents: ${list}`);
+    super(
+      agent === undefined
+        ? `no agent was named and no general agent is configured; configured agents: ${list}`
+        : `unknown agent "${agent}"; configured agents: ${list}`,
+    );
     this.name = 'UnknownAgentError';
+  }
+}
+
+/** A request resolved to a tier that is not configured, or whose host has no child driver. */
+export class TierError extends Error {
+  readonly code = 'unknown_tier';
+  constructor(
+    readonly tier: string,
+    readonly configured: string[],
+    /** Set when the host is the cause. */
+    readonly host?: string,
+    readonly supportedHosts?: string[],
+  ) {
+    const list = configured.length > 0 ? configured.join(', ') : '(none)';
+    super(
+      host === undefined
+        ? `unknown tier "${tier}"; configured tiers: ${list}`
+        : `tier "${tier}" runs on the host "${host}", which has no registered child driver; supported hosts: ${
+            (supportedHosts ?? []).length === 0 ? '(none)' : supportedHosts!.join(', ')
+          }; configured tiers: ${list}`,
+    );
+    this.name = 'TierError';
+  }
+}
+
+/** `init` found a default tier on another host than the one it was given. */
+export class StarterHostConflictError extends Error {
+  readonly code = 'starter_host_conflict';
+  constructor(
+    readonly existingHost: string,
+    readonly givenHost: string,
+  ) {
+    super(
+      `the default tier of the agent file is on the host "${existingHost}", not "${givenHost}"; ` +
+        'nothing was written. Edit the default tier, or run init with that host.',
+    );
+    this.name = 'StarterHostConflictError';
   }
 }
 
@@ -77,15 +179,23 @@ export function modelEndpoint(model: string): string {
   return slash === -1 ? model : model.slice(0, slash);
 }
 
+const TIER_KEYS = ['host', 'model', 'thinking'] as const;
+const AGENT_KEYS = ['description', 'skills', 'tools', 'timeout', 'tier', 'tiers'];
+const ROUTING_KEYS = ['hook', 'generic_agents'];
+
 const agentSchema = z.object({
-  description: z.string().min(1, 'needs a description'),
-  host: z.literal('pi'),
-  model: z.string().min(1),
-  thinking: z.enum(THINKING_LEVELS),
+  description: z.string().min(1, 'needs a description').optional(),
   skills: z.array(z.string().min(1)).default([]),
   tools: z.array(z.string().min(1)).min(1, 'needs at least one tool'),
   timeout: z.number().positive(),
+  tier: z.string().min(1).optional(),
 });
+
+const tierFieldSchemas = {
+  host: z.string().min(1, 'must be a non-empty string'),
+  model: z.string().min(1, 'must be a non-empty string'),
+  thinking: z.enum(THINKING_LEVELS),
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -94,28 +204,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Read and validate the agent file. One invalid entry fails the whole load. */
 export function loadAgentFile(projectRoot: string): AgentCatalog {
   const agentFile = path.join(projectRoot, AGENT_FILE);
-  let text: string;
+  return parseCatalog(readAgentText(agentFile), agentFile);
+}
+
+function readAgentText(agentFile: string): string {
   try {
-    text = readFileSync(agentFile, 'utf8');
+    return readFileSync(agentFile, 'utf8');
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') throw new LoadError(`agent file is missing: ${agentFile}`);
     throw new LoadError(`agent file is unreadable: ${agentFile} (${code ?? String(err)})`);
   }
+}
 
-  let doc: unknown;
+function parseCatalog(text: string, agentFile: string): AgentCatalog {
+  const malformed = (detail: string) => new LoadError(`agent file is malformed: ${agentFile}: ${detail}`);
+  let parsed: unknown;
   try {
-    doc = parseYaml(text);
+    parsed = parseYaml(text);
   } catch (err) {
-    throw new LoadError(`agent file is malformed: ${agentFile}: ${(err as Error).message}`);
+    throw malformed((err as Error).message);
   }
-  if (!isRecord(doc) || !isRecord(doc.agents)) {
-    throw new LoadError(`agent file is malformed: ${agentFile}: expected an "agents" map`);
-  }
+  const doc: unknown = parsed === null ? {} : parsed;
+  if (!isRecord(doc)) throw malformed('expected a map');
+  const agentsMap = doc.agents ?? {};
+  if (!isRecord(agentsMap)) throw malformed('expected an "agents" map');
   const skillsMap = doc.skills ?? {};
   const endpointsMap = doc.endpoints ?? {};
-  if (!isRecord(skillsMap)) throw new LoadError(`agent file is malformed: ${agentFile}: "skills" must be a map`);
-  if (!isRecord(endpointsMap)) throw new LoadError(`agent file is malformed: ${agentFile}: "endpoints" must be a map`);
+  if (!isRecord(skillsMap)) throw malformed('"skills" must be a map');
+  if (!isRecord(endpointsMap)) throw malformed('"endpoints" must be a map');
+  if (doc.models !== undefined && !isRecord(doc.models)) throw malformed('"models" must be a map');
+  const modelsMap = (doc.models ?? {}) as Record<string, unknown>;
+  if (modelsMap.tiers !== undefined && !isRecord(modelsMap.tiers)) throw malformed('"models.tiers" must be a map');
 
   const baseDir = path.dirname(agentFile);
   const skillFolders = new Map<string, string>();
@@ -135,82 +255,329 @@ export function loadAgentFile(projectRoot: string): AgentCatalog {
     limits.set(endpoint, parallel);
   }
 
-  const agents = new Map<string, AgentDefinition>();
-  for (const [name, raw] of Object.entries(doc.agents)) {
-    agents.set(name, validateAgent(name, raw, skillFolders, limits));
+  const tiers = new Map<string, ModelTier>();
+  for (const [name, raw] of Object.entries((modelsMap.tiers ?? {}) as Record<string, unknown>)) {
+    tiers.set(name, validateTier(name, raw));
   }
 
-  const used = new Set([...agents.values()].map((a) => a.endpoint));
+  const entries = new Map<string, AgentEntry>();
+  for (const [name, raw] of Object.entries(agentsMap)) {
+    entries.set(name, validateAgent(name, raw, skillFolders, tiers));
+  }
+
+  const routing = validateRouting(doc.routing);
+
+  const used = new Set<string>();
+  for (const tier of tiers.values()) used.add(modelEndpoint(tier.model));
+  for (const entry of entries.values()) {
+    for (const override of entry.overrides.values()) {
+      if (override.model !== undefined) used.add(modelEndpoint(override.model));
+    }
+  }
   for (const endpoint of limits.keys()) {
     if (!used.has(endpoint)) {
-      throw new LoadError(`endpoint "${endpoint}": no agent definition belongs to it`);
+      throw new LoadError(`endpoint "${endpoint}": no model of a tier or of a tier override belongs to it`);
     }
   }
 
-  return { agentFile, agents };
+  if (entries.size > 0 && !tiers.has(DEFAULT_TIER)) throw new MissingDefaultTierError();
+
+  return { agentFile, entries, tiers, routing, limits };
+}
+
+function validateTier(name: string, raw: unknown): ModelTier {
+  if (!isRecord(raw)) throw new LoadError(`tier "${name}": must be a map of host, model and thinking`);
+  for (const key of TIER_KEYS) {
+    if (raw[key] === undefined || raw[key] === null || raw[key] === '') {
+      throw new LoadError(`tier "${name}": ${key} is required`);
+    }
+  }
+  for (const key of Object.keys(raw)) {
+    if (!(TIER_KEYS as readonly string[]).includes(key)) throw new LoadError(`tier "${name}": unknown key "${key}"`);
+  }
+  return {
+    host: checkField(`tier "${name}"`, 'host', raw.host) as string,
+    model: checkField(`tier "${name}"`, 'model', raw.model) as string,
+    thinking: checkField(`tier "${name}"`, 'thinking', raw.thinking) as ThinkingLevel,
+  };
+}
+
+function checkField(label: string, key: (typeof TIER_KEYS)[number], value: unknown): unknown {
+  const parsed = tierFieldSchemas[key].safeParse(value);
+  if (!parsed.success) throw new LoadError(`${label}: ${key}: ${parsed.error.issues[0]?.message ?? 'invalid'}`);
+  return parsed.data;
+}
+
+/** `general` and `fallback` are named bare in errors, any other entry as `agent "<name>"`. */
+function agentLabel(name: string): string {
+  return name === GENERAL_AGENT || name === FALLBACK_AGENT ? name : `agent "${name}"`;
 }
 
 function validateAgent(
   name: string,
   raw: unknown,
   skillFolders: Map<string, string>,
-  limits: Map<string, number>,
-): AgentDefinition {
-  if (!isRecord(raw)) throw new LoadError(`agent "${name}": must be a map`);
-  if (raw.host !== 'pi') {
-    throw new LoadError(`agent "${name}": host must be pi (got ${JSON.stringify(raw.host ?? null)})`);
+  tiers: Map<string, ModelTier>,
+): AgentEntry {
+  const label = agentLabel(name);
+  const reserved = name === GENERAL_AGENT || name === FALLBACK_AGENT;
+  if (!isRecord(raw)) throw new LoadError(`${label}: must be a map`);
+  for (const key of TIER_KEYS) {
+    if (raw[key] !== undefined) {
+      throw new LoadError(`${label}: ${key} cannot be set on an agent; host, model and thinking belong to a tier in models.tiers`);
+    }
   }
-  if (raw.model === undefined || raw.model === null || raw.model === '') {
-    throw new LoadError(`agent "${name}": host pi requires a model`);
+  for (const key of Object.keys(raw)) {
+    if (!AGENT_KEYS.includes(key)) throw new LoadError(`${label}: unknown key "${key}"`);
+  }
+  if (reserved && raw.description !== undefined) {
+    throw new LoadError(`${label}: a description is not allowed; ${name} is never chosen by its description`);
+  }
+  if (!reserved && (raw.description === undefined || raw.description === null || raw.description === '')) {
+    throw new LoadError(`${label}: description is required`);
   }
   if (raw.timeout === undefined || raw.timeout === null) {
-    throw new LoadError(`agent "${name}": timeout is required (seconds)`);
+    throw new LoadError(`${label}: timeout is required (seconds)`);
   }
   if (typeof raw.timeout !== 'number' || !(raw.timeout > 0)) {
-    throw new LoadError(`agent "${name}": timeout must be a positive number of seconds`);
+    throw new LoadError(`${label}: timeout must be a positive number of seconds`);
   }
 
   const parsed = agentSchema.safeParse(raw);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     const where = issue?.path.join('.') || 'entry';
-    throw new LoadError(`agent "${name}": ${where}: ${issue?.message ?? 'invalid'}`);
+    throw new LoadError(`${label}: ${where}: ${issue?.message ?? 'invalid'}`);
   }
   const def = parsed.data;
+
+  if (def.tier !== undefined && !tiers.has(def.tier)) {
+    throw new LoadError(`${label}: tier "${def.tier}" is not configured in models.tiers`);
+  }
+
+  const overrides = new Map<string, Partial<ModelTier>>();
+  if (raw.tiers !== undefined) {
+    if (!isRecord(raw.tiers)) throw new LoadError(`${label}: tiers must be a map of tier name to overrides`);
+    for (const [tier, override] of Object.entries(raw.tiers)) {
+      const where = `${label}: tiers.${tier}`;
+      if (!tiers.has(tier)) throw new LoadError(`${where}: tier "${tier}" is not configured in models.tiers`);
+      if (!isRecord(override)) throw new LoadError(`${where}: must be a map of host, model and thinking`);
+      const fields: Partial<ModelTier> = {};
+      for (const [key, value] of Object.entries(override)) {
+        if (!(TIER_KEYS as readonly string[]).includes(key)) {
+          throw new LoadError(`${where}: ${key} cannot be overridden; only host, model and thinking can`);
+        }
+        (fields as Record<string, unknown>)[key] = checkField(where, key as (typeof TIER_KEYS)[number], value);
+      }
+      overrides.set(tier, fields);
+    }
+  }
 
   const skills: SkillRef[] = def.skills.map((skill) => {
     const folder = skillFolders.get(skill);
     if (folder === undefined) {
-      throw new LoadError(`agent "${name}": skill "${skill}" is not in the skills map`);
+      throw new LoadError(`${label}: skill "${skill}" is not in the skills map`);
     }
     return { name: skill, folder };
   });
 
-  const endpoint = modelEndpoint(def.model);
   return {
     name,
-    description: def.description,
-    host: 'pi',
-    model: def.model,
-    thinking: def.thinking,
+    ...(def.description !== undefined ? { description: def.description } : {}),
     skills,
     tools: def.tools,
     timeout: def.timeout,
-    endpoint,
-    parallel: limits.get(endpoint) ?? null,
+    ...(def.tier !== undefined ? { tier: def.tier } : {}),
+    overrides,
   };
 }
 
-/** Look up one agent definition, reading the agent file again. */
-export function getAgent(projectRoot: string, name: string): AgentDefinition {
-  const { agents } = loadAgentFile(projectRoot);
-  const agent = agents.get(name);
-  if (agent === undefined) throw new UnknownAgentError(name, [...agents.keys()]);
-  return agent;
+function validateRouting(raw: unknown): RoutingSettings {
+  if (raw === undefined || raw === null) return { hook: true };
+  if (!isRecord(raw)) throw new LoadError('routing: must be a map');
+  for (const key of Object.keys(raw)) {
+    if (!ROUTING_KEYS.includes(key)) throw new LoadError(`routing: unknown key "${key}"`);
+  }
+  if (raw.hook !== undefined && typeof raw.hook !== 'boolean') throw new LoadError('routing: hook must be true or false');
+  const list = raw.generic_agents;
+  if (list !== undefined && !(Array.isArray(list) && list.every((v) => typeof v === 'string' && v !== ''))) {
+    throw new LoadError('routing: generic_agents must be a list of agent type names');
+  }
+  return { hook: raw.hook !== false, genericAgents: list as string[] | undefined };
+}
+
+/** Resolve one agent entry at a tier: the one named, else its own, else the default. */
+export function resolveAgent(catalog: AgentCatalog, name: string | undefined, options: ResolveOptions = {}): AgentDefinition {
+  const entryName = name ?? GENERAL_AGENT;
+  const entry = catalog.entries.get(entryName);
+  if (entry === undefined) throw new UnknownAgentError(name, [...catalog.entries.keys()]);
+
+  const tierName = options.tier ?? entry.tier ?? DEFAULT_TIER;
+  const configured = [...catalog.tiers.keys()];
+  const base = catalog.tiers.get(tierName);
+  if (base === undefined) throw new TierError(tierName, configured);
+  const resolved: ModelTier = { ...base, ...entry.overrides.get(tierName) };
+  const supported = options.supportedHosts;
+  if (supported !== undefined && !supported.includes(resolved.host)) {
+    throw new TierError(tierName, configured, resolved.host, supported);
+  }
+
+  const endpoint = modelEndpoint(resolved.model);
+  return {
+    name: options.tier !== undefined ? `${entryName}:${options.tier}` : entryName,
+    ...(entry.description !== undefined ? { description: entry.description } : {}),
+    host: resolved.host,
+    model: resolved.model,
+    thinking: resolved.thinking,
+    skills: entry.skills,
+    tools: entry.tools,
+    timeout: entry.timeout,
+    endpoint,
+    parallel: catalog.limits.get(endpoint) ?? null,
+  };
+}
+
+/** Look up one agent definition, reading the agent file again. No name means `general`. */
+export function getAgent(projectRoot: string, name: string | undefined, options: ResolveOptions = {}): AgentDefinition {
+  return resolveAgent(loadAgentFile(projectRoot), name, options);
 }
 
 export function listAgentNames(projectRoot: string): string[] {
-  return [...loadAgentFile(projectRoot).agents.keys()];
+  return [...loadAgentFile(projectRoot).entries.keys()];
+}
+
+/** Every configured model tier name, routable or not. */
+export function configuredTierNames(projectRoot: string): string[] {
+  return [...loadAgentFile(projectRoot).tiers.keys()];
+}
+
+/**
+ * The tiers the general agent can run, with the host and model each runs. There are
+ * none without a general entry. With no supported hosts given, no host is checked.
+ */
+export function routableTiers(projectRoot: string, supportedHosts?: string[]): RoutableTier[] {
+  const catalog = loadAgentFile(projectRoot);
+  const general = catalog.entries.get(GENERAL_AGENT);
+  if (general === undefined) return [];
+  const out: RoutableTier[] = [];
+  for (const [tier, base] of catalog.tiers) {
+    const resolved: ModelTier = { ...base, ...general.overrides.get(tier) };
+    if (supportedHosts === undefined || supportedHosts.includes(resolved.host)) out.push({ tier, ...resolved });
+  }
+  return out;
+}
+
+/** The hook switch and generic agent list as the agent file gives them. */
+export function getRouting(projectRoot: string): RoutingSettings {
+  return loadAgentFile(projectRoot).routing;
+}
+
+export interface StarterSpec {
+  host: string;
+  model: string;
+  thinking: ThinkingLevel;
+  /** Seconds, for both entries. */
+  timeout: number;
+  generalTools: string[];
+  fallbackTools: string[];
+}
+
+export type StarterEntry = 'default' | 'general' | 'fallback';
+
+export interface StarterResult {
+  added: StarterEntry[];
+  present: StarterEntry[];
+}
+
+/**
+ * Add the default tier, `general` and `fallback`, each only when the agent file lacks
+ * it, with no skills and every existing line untouched. Writes nothing on any refusal.
+ */
+export function addStarterEntries(projectRoot: string, spec: StarterSpec): StarterResult {
+  const agentFile = path.join(projectRoot, AGENT_FILE);
+  let text: string | null = null;
+  try {
+    text = readAgentText(agentFile);
+  } catch (err) {
+    if (!(err instanceof LoadError) || !/is missing/.test(err.message)) throw err;
+  }
+
+  if (text !== null) {
+    try {
+      parseCatalog(text, agentFile);
+    } catch (err) {
+      // A missing default tier is the one thing init repairs.
+      if (!(err instanceof MissingDefaultTierError)) throw err;
+    }
+  }
+
+  const original = text ?? '';
+  const doc: Document = parseDocument(original);
+  const existingHost = doc.getIn(['models', 'tiers', DEFAULT_TIER, 'host']);
+  if (typeof existingHost === 'string' && existingHost !== spec.host) {
+    throw new StarterHostConflictError(existingHost, spec.host);
+  }
+
+  const result: StarterResult = { added: [], present: [] };
+  const note = (entry: StarterEntry, has: boolean) => (has ? result.present : result.added).push(entry);
+  const hasDefault = doc.hasIn(['models', 'tiers', DEFAULT_TIER]);
+  const hasGeneral = doc.hasIn(['agents', GENERAL_AGENT]);
+  const hasFallback = doc.hasIn(['agents', FALLBACK_AGENT]);
+  note('default', hasDefault);
+  note('general', hasGeneral);
+  note('fallback', hasFallback);
+  if (result.added.length === 0) return result;
+
+  // Existing text is never re-rendered: new lines are spliced in after the last
+  // entry of a block map, or appended to the end of the file.
+  const flow = (value: unknown) => stringifyYaml(value, { collectionStyle: 'flow', lineWidth: 0 }).trimEnd();
+  const agentLines = (name: string, tools: string[], indent: string) =>
+    `${indent}${name}:\n${indent}  tools: ${flow(tools)}\n${indent}  timeout: ${spec.timeout}\n`;
+  const defaultLine = (indent: string) =>
+    `${indent}${DEFAULT_TIER}: ${flow({ host: spec.host, model: spec.model, thinking: spec.thinking })}\n`;
+
+  const inserts: { at: number; text: string }[] = [];
+  let appended = '';
+  const mapAt = (keys: string[]) => {
+    const node = doc.getIn(keys, true);
+    if (node === undefined || node === null) return undefined;
+    if (!isMap(node) || node.flow === true || node.items.length === 0 || node.range === null || node.range === undefined) {
+      throw new LoadError(`agent file: ${keys.join('.')} must be a block-style map for init to add entries to it`);
+    }
+    const first = (node.items[0]!.key as { range: [number, number, number] }).range[0];
+    return { end: node.range[1], indent: ' '.repeat(first - (original.lastIndexOf('\n', first - 1) + 1)) };
+  };
+  const insert = (at: number, body: string) => inserts.push({ at, text: (at > 0 && original[at - 1] !== '\n' ? '\n' : '') + body });
+
+  if (!hasDefault) {
+    const tiers = mapAt(['models', 'tiers']);
+    const models = tiers === undefined ? mapAt(['models']) : undefined;
+    if (tiers !== undefined) insert(tiers.end, defaultLine(tiers.indent));
+    else if (models !== undefined) insert(models.end, `${models.indent}tiers:\n${defaultLine(`${models.indent}  `)}`);
+    else appended += `models:\n  tiers:\n${defaultLine('    ')}`;
+  }
+  const agentsAt = mapAt(['agents']);
+  const indent = agentsAt?.indent ?? '  ';
+  let agentBody = '';
+  if (!hasGeneral) agentBody += agentLines(GENERAL_AGENT, spec.generalTools, indent);
+  if (!hasFallback) agentBody += agentLines(FALLBACK_AGENT, spec.fallbackTools, indent);
+  if (agentBody !== '') {
+    if (agentsAt !== undefined) insert(agentsAt.end, agentBody);
+    else if (doc.has('agents')) {
+      throw new LoadError('agent file: agents must be a block-style map for init to add entries to it');
+    } else appended += `agents:\n${agentBody}`;
+  }
+
+  let next = original;
+  for (const { at, text: body } of inserts.sort((x, y) => y.at - x.at)) next = next.slice(0, at) + body + next.slice(at);
+  if (appended !== '') {
+    if (next !== '' && !next.endsWith('\n')) next += '\n';
+    next += (next === '' ? '' : '\n') + appended;
+  }
+  parseCatalog(next, agentFile); // entries that do not load are never written
+  mkdirSync(path.dirname(agentFile), { recursive: true });
+  writeFileSync(agentFile, next);
+  return result;
 }
 
 export interface RootSources {

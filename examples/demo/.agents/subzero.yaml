@@ -7,12 +7,17 @@ endpoints:
   r9700:
     parallel: 1
 
+# What runs a child lives here and never in an agent: host, model and thinking.
+models:
+  tiers:
+    default:
+      host: pi
+      model: r9700/Qwen3.8
+      thinking: low
+
 agents:
   reviewer:
     description: Reviews one source file for bugs and replies with the findings, one line each.
-    host: pi
-    model: r9700/Qwen3.8
-    thinking: low
     skills: [code-review]
     tools: [read, grep, find, ls]
     timeout: 600

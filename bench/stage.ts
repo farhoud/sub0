@@ -43,10 +43,11 @@ export async function stagePass(outDir: string, claudeModel: string, sigilc: str
   for (const name of STAGED_SKILLS) await copySkill(join(SIGIL_REPO, "skills", name), join(passDir, "skills", name));
 
   // B-control's interpreter must run on the Claude model of A's interpreters,
-  // which is this pass's evaluator model; the staged copy is set to it.
+  // which is this pass's evaluator model; the staged copy sets the model of the
+  // control tier to it.
   const controlModel = piClaudeModel(claudeModel);
   const yaml = readFileSync(join(WIRING, ".agents", "subzero.yaml"), "utf8").replace(
-    /(sigil-interpreter-control:[\s\S]*?model: )\S+/,
+    /(\n    control:[\s\S]*?model: )\S+/,
     `$1${controlModel}`,
   );
   mkdirSync(join(passDir, ".agents"));

@@ -20,12 +20,12 @@ Read `.agents/subzero.yaml` in the project. It must define an agent named
 ```yaml
 skills:
   code-review: ../pi-skills/code-review
+models:
+  tiers:
+    default: { host: pi, model: <provider>/<model>, thinking: low }
 agents:
   reviewer:
     description: Reviews one source file for bugs.
-    host: pi
-    model: <provider>/<model>
-    thinking: low
     skills: [code-review]
     tools: [read, grep, find, ls]
     timeout: 600

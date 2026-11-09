@@ -2,10 +2,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/cli.js';
+import { getAgent } from '../../src/config/agent-config.js';
 import { unavailableUsage } from '../../src/core/types.js';
 import { Kernel } from '../../src/kernel/kernel.js';
 import { TaskStore } from '../../src/store/task-store.js';
-import { FAKE_PI_COMMAND, fakePiEnv, kernelWithPort, makeProject, piKernel, tempDir } from '../helpers.js';
+import { DEFAULT_YAML, FAKE_PI_COMMAND, fakePiEnv, kernelWithPort, makeProject, piKernel, tempDir } from '../helpers.js';
 
 function cli(root: string, scenario: Record<string, unknown> = {}) {
   const fake = fakePiEnv(scenario);
@@ -25,7 +26,7 @@ describe('Cli', () => {
   it('subzero run writes task.json, events.jsonl, turns/1.json and an index line, and prints the result', async () => {
     const root = makeProject();
     const { run, out } = cli(root);
-    expect(await run('run', 'helper', 'do', 'the', 'thing')).toBe(0);
+    expect(await run('run', '--agent', 'helper', 'do', 'the', 'thing')).toBe(0);
     expect(out.join('\n')).toMatch(/^task: (sz-[a-z2-7]{6}) · helper · status: completed/);
     const taskId = /sz-[a-z2-7]{6}/.exec(out[0]!)![0];
     const dir = path.join(root, '.agents', 'subzero', 'tasks', taskId);
@@ -39,15 +40,48 @@ describe('Cli', () => {
   it('prints the unknown agent error and exits non-zero without making a task', async () => {
     const root = makeProject();
     const { run, err } = cli(root);
-    expect(await run('run', 'nobody', 'x')).toBe(1);
+    expect(await run('run', '--agent', 'nobody', 'x')).toBe(1);
     expect(err.join('\n')).toMatch(/unknown agent "nobody"; configured agents: helper, other, free/);
     expect(existsSync(path.join(root, '.agents', 'subzero'))).toBe(false);
+  });
+
+  it('runs general with no --agent option, and a lone argument is always the brief', async () => {
+    const root = makeProject(DEFAULT_YAML + '  general:\n    tools: [read]\n    timeout: 30\n');
+    const { run, out } = cli(root);
+    expect(await run('run', 'helper')).toBe(0);
+    expect(out[0]).toMatch(/^task: sz-[a-z2-7]{6} · general · status: completed/);
+    const taskId = /sz-[a-z2-7]{6}/.exec(out[0]!)![0];
+    expect(JSON.parse(readFileSync(path.join(root, '.agents', 'subzero', 'tasks', taskId, 'task.json'), 'utf8')).brief).toBe('helper');
+  });
+
+  it('runs general at the default tier with the host, model and thinking of that tier', async () => {
+    const root = makeProject(DEFAULT_YAML + '  general:\n    tools: [read]\n    timeout: 30\n');
+    const { run, out } = cli(root);
+    await run('run', 'go');
+    const taskId = /sz-[a-z2-7]{6}/.exec(out[0]!)![0];
+    const frozen = JSON.parse(readFileSync(path.join(root, '.agents', 'subzero', 'tasks', taskId, 'task.json'), 'utf8')).agent;
+    expect(frozen).toMatchObject({ name: 'general', host: 'pi', model: 'local/qwen', thinking: 'high' });
+  });
+
+  it('with no --agent and no general entry prints the unknown agent error and runs nothing, never fallback', async () => {
+    const root = makeProject(DEFAULT_YAML + '  fallback:\n    tools: [read]\n    timeout: 30\n');
+    const { run, err } = cli(root);
+    expect(await run('run', 'do it')).toBe(1);
+    expect(err.join('\n')).toMatch(/no agent was named.*helper, other, free, fallback/);
+    expect(existsSync(path.join(root, '.agents', 'subzero'))).toBe(false);
+  });
+
+  it('prints the usage when run has no brief or an unknown option', async () => {
+    const { run, err } = cli(makeProject());
+    expect(await run('run', '--agent', 'helper')).toBe(2);
+    expect(await run('run', '--agnt', 'helper', 'x')).toBe(2);
+    expect(err.join('\n')).toMatch(/usage/);
   });
 
   it('lists tasks with id, agent, status and creation time', async () => {
     const root = makeProject();
     const { run, out } = cli(root);
-    await run('run', 'helper', 'x');
+    await run('run', '--agent', 'helper', 'x');
     out.length = 0;
     expect(await run('tasks')).toBe(0);
     expect(out[0]).toMatch(/^sz-[a-z2-7]{6} {2}helper {2}completed {2}\d{4}-/);
@@ -56,7 +90,7 @@ describe('Cli', () => {
   it('builds the attach command from the launch spec of a settled task', async () => {
     const root = makeProject();
     const { run, out } = cli(root);
-    await run('run', 'helper', 'x');
+    await run('run', '--agent', 'helper', 'x');
     const taskId = /sz-[a-z2-7]{6}/.exec(out[0]!)![0];
     out.length = 0;
     expect(await run('attach', taskId)).toBe(0);
@@ -80,7 +114,7 @@ describe('Cli', () => {
   it('exports the child session with pi --export', async () => {
     const root = makeProject();
     const { run, out } = cli(root);
-    await run('run', 'helper', 'x');
+    await run('run', '--agent', 'helper', 'x');
     const taskId = /sz-[a-z2-7]{6}/.exec(out[0]!)![0];
     const html = path.join(tempDir(), 'out.html');
     expect(await run('show', taskId, '-o', html)).toBe(0);
@@ -98,6 +132,126 @@ describe('Cli', () => {
     const { run, out } = cli(root);
     await run('show', 'sz-abandd');
     expect(out[0]).toMatch(/abandoned.*no result/);
+  });
+
+  describe('init', () => {
+    const FULL = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'];
+    const READ_ONLY = ['read', 'grep', 'find', 'ls'];
+    const agentFile = (root: string) => path.join(root, '.agents', 'subzero.yaml');
+
+    it('creates the agent file from a model alone, with the one registered host (AE13)', async () => {
+      const root = tempDir();
+      const { run, out } = cli(root);
+      expect(await run('init', 'r9700/Qwen3.8')).toBe(0);
+      expect(out.join('\n')).toMatch(/added.*default.*general.*fallback/s);
+      expect(getAgent(root, 'general')).toMatchObject({ host: 'pi', model: 'r9700/Qwen3.8', thinking: 'medium', timeout: 1200, tools: FULL, skills: [] });
+      expect(getAgent(root, 'fallback')).toMatchObject({ tools: READ_ONLY, timeout: 1200 });
+    });
+
+    it('takes --timeout, --thinking and --host', async () => {
+      const root = tempDir();
+      const { run } = cli(root);
+      expect(await run('init', 'm/x', '--host', 'pi', '--timeout', '90', '--thinking', 'high')).toBe(0);
+      expect(getAgent(root, 'general')).toMatchObject({ thinking: 'high', timeout: 90 });
+    });
+
+    it('changes nothing when run again, and says all three entries are already there', async () => {
+      const root = tempDir();
+      const { run, out } = cli(root);
+      await run('init', 'm/x');
+      const before = readFileSync(agentFile(root), 'utf8');
+      out.length = 0;
+      expect(await run('init', 'm/y')).toBe(0);
+      expect(readFileSync(agentFile(root), 'utf8')).toBe(before);
+      expect(out.join('\n')).toMatch(/all three entries.*already there/);
+    });
+
+    it('adds only the fallback agent beside an existing general agent, leaving its lines alone', async () => {
+      const text = `models:\n  tiers:\n    default: { host: pi, model: a/b, thinking: low }\nagents:\n  general:\n    tools: [read]\n    timeout: 7\n`;
+      const root = makeProject(text);
+      const { run, out } = cli(root);
+      expect(await run('init', 'm/x')).toBe(0);
+      expect(readFileSync(agentFile(root), 'utf8').startsWith(text)).toBe(true);
+      expect(getAgent(root, 'general')).toMatchObject({ timeout: 7, tools: ['read'], model: 'a/b' });
+      expect(getAgent(root, 'fallback').tools).toEqual(READ_ONLY);
+      expect(out.join('\n')).toMatch(/added.*fallback/s);
+    });
+
+    it('refuses naming both hosts, exits non-zero and writes nothing when default is on another host', async () => {
+      const text = `models:\n  tiers:\n    default: { host: claude, model: a/b, thinking: low }\nagents:\n  general:\n    tools: [read]\n    timeout: 7\n`;
+      const root = makeProject(text);
+      const { run, err } = cli(root);
+      expect(await run('init', 'm/x', '--host', 'pi')).toBe(1);
+      expect(err.join('\n')).toMatch(/claude.*pi/);
+      expect(readFileSync(agentFile(root), 'utf8')).toBe(text);
+    });
+
+    it('adds the default tier to a file that holds agents and no default tier', async () => {
+      const text = `agents:\n  general:\n    tools: [read]\n    timeout: 7\n`;
+      const root = makeProject(text);
+      const { run } = cli(root);
+      expect(await run('init', 'm/x')).toBe(0);
+      expect(getAgent(root, 'general').model).toBe('m/x');
+    });
+
+    it('prints the load error, exits non-zero and writes nothing when the file does not load', async () => {
+      const text = `models:\n  tiers:\n    default: { host: pi, model: a/b, thinking: low }\nagents:\n  a:\n    description: d\n    tools: [read]\n`;
+      const root = makeProject(text);
+      const { run, err } = cli(root);
+      expect(await run('init', 'm/x')).toBe(1);
+      expect(err.join('\n')).toMatch(/agent "a": timeout/);
+      expect(readFileSync(agentFile(root), 'utf8')).toBe(text);
+    });
+
+    it('refuses without a model, with a bad timeout or a bad thinking level, writing nothing', async () => {
+      const root = tempDir();
+      const { run, err } = cli(root);
+      expect(await run('init')).toBe(2);
+      expect(await run('init', 'm/x', '--timeout', 'soon')).toBe(2);
+      expect(await run('init', 'm/x', '--thinking', 'deep')).toBe(2);
+      expect(err.join('\n')).toMatch(/thinking.*off, minimal, low, medium, high, xhigh, max/);
+      expect(existsSync(agentFile(root))).toBe(false);
+    });
+
+    function withKernel(root: string, kernel: Kernel) {
+      const err: string[] = [];
+      const run = (...argv: string[]) =>
+        runCli(argv, { out: () => {}, err: (t) => err.push(t) }, { env: { SUBZERO_PROJECT_DIR: root }, warn: () => {}, interactive: false, kernel });
+      return { run, err };
+    }
+
+    it('refuses when no host is registered', async () => {
+      const root = tempDir();
+      const { run, err } = withKernel(root, new Kernel());
+      expect(await run('init', 'm/x')).toBe(1);
+      expect(err.join('\n')).toMatch(/no host is registered/);
+      expect(existsSync(agentFile(root))).toBe(false);
+    });
+
+    it('refuses naming every supported host when several are registered and none is given, or the host is unsupported', async () => {
+      const root = tempDir();
+      const kernel = new Kernel();
+      const driver = { port: { start: () => { throw new Error('unused'); } }, starterTools: () => ({ general: ['g'], fallback: ['f'] }) };
+      kernel.registerChildDriver('pi', driver);
+      kernel.registerChildDriver('codex', driver);
+      const { run, err } = withKernel(root, kernel);
+      expect(await run('init', 'm/x')).toBe(1);
+      expect(err.at(-1)).toMatch(/pi, codex/);
+      expect(await run('init', 'm/x', '--host', 'acp')).toBe(1);
+      expect(err.at(-1)).toMatch(/"acp".*pi, codex/);
+      expect(existsSync(agentFile(root))).toBe(false);
+      expect(await run('init', 'm/x', '--host', 'codex')).toBe(0);
+      expect(getAgent(root, 'general')).toMatchObject({ host: 'codex', tools: ['g'] });
+      expect(getAgent(root, 'fallback').tools).toEqual(['f']);
+    });
+
+    it('refuses naming the host when its child driver offers no starter tools', async () => {
+      const root = tempDir();
+      const { run, err } = withKernel(root, kernelWithPort({ start: () => { throw new Error('unused'); } }));
+      expect(await run('init', 'm/x')).toBe(1);
+      expect(err.join('\n')).toMatch(/host "?pi"? offers no starter tools/);
+      expect(existsSync(agentFile(root))).toBe(false);
+    });
   });
 
   describe('through the driver registry', () => {

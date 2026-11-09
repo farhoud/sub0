@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadAgentFile } from '../../src/config/agent-config.js';
+import { getAgent, loadAgentFile } from '../../src/config/agent-config.js';
 import { readParentSessionId } from '../../src/mcp/parent-session.js';
 import { tempDir } from '../helpers.js';
 
@@ -14,15 +14,30 @@ const agentFile = (name: string) => readFileSync(path.join(EXAMPLE, 'agents', na
 const unroute = (text: string, name: string) => text.replace(`\`${name}\``, '`<route>`');
 
 describe('SigilWiring', () => {
-  it('defines the three interpreter agents on the staged skills, sharing the r9700 limit', () => {
-    const { agents } = loadAgentFile(EXAMPLE);
-    expect([...agents.keys()].sort()).toEqual(['sigil-interpreter', 'sigil-interpreter-control', 'sigil-interpreter-low']);
-    const qwen = agents.get('sigil-interpreter')!;
-    expect(qwen).toMatchObject({ model: 'r9700/Qwen3.8', thinking: 'high', endpoint: 'r9700', parallel: 1 });
+  it('puts the three interpreter agents on the default, low and control tiers of the host pi, sharing the r9700 limit', () => {
+    const { entries, tiers } = loadAgentFile(EXAMPLE);
+    expect([...entries.keys()].sort()).toEqual(['sigil-interpreter', 'sigil-interpreter-control', 'sigil-interpreter-low']);
+    expect([...tiers.keys()]).toEqual(['default', 'low', 'control']);
+    expect(tiers.get('default')).toEqual({ host: 'pi', model: 'r9700/Qwen3.8', thinking: 'high' });
+    expect(tiers.get('low')).toEqual({ host: 'pi', model: 'r9700/Qwen3.8', thinking: 'low' });
+    expect(tiers.get('control')).toEqual({ host: 'pi', model: 'anthropic/claude-sonnet-5-5', thinking: 'high' });
+    const qwen = getAgent(EXAMPLE, 'sigil-interpreter');
+    expect(qwen).toMatchObject({ host: 'pi', model: 'r9700/Qwen3.8', thinking: 'high', endpoint: 'r9700', parallel: 1 });
     expect(qwen.tools).toEqual(['read', 'grep', 'find', 'ls', 'write']);
     expect(qwen.skills.map((s) => s.folder)).toEqual([path.join(EXAMPLE, 'skills', 'sigil-understand'), path.join(EXAMPLE, 'skills', 'sigil-egglog')]);
-    expect(agents.get('sigil-interpreter-low')).toMatchObject({ thinking: 'low', parallel: 1 });
-    expect(agents.get('sigil-interpreter-control')).toMatchObject({ thinking: 'high', parallel: null });
+    expect(getAgent(EXAMPLE, 'sigil-interpreter-low')).toMatchObject({ host: 'pi', model: 'r9700/Qwen3.8', thinking: 'low', parallel: 1 });
+    expect(getAgent(EXAMPLE, 'sigil-interpreter-control')).toMatchObject({ host: 'pi', model: 'anthropic/claude-sonnet-5-5', thinking: 'high', parallel: null });
+  });
+
+  it('keeps the demo reviewer working on the default tier', () => {
+    expect(getAgent(path.join(REPO, 'examples', 'demo'), 'reviewer')).toMatchObject({
+      host: 'pi',
+      model: 'r9700/Qwen3.8',
+      thinking: 'low',
+      tools: ['read', 'grep', 'find', 'ls'],
+      timeout: 600,
+      parallel: 1,
+    });
   });
 
   it('keeps the B evaluators identical except for the interpreter they route to, and disallows Agent', () => {
