@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { formatElapsed, ProgressReporter } from '../../src/mcp/progress.js';
+import { ProgressReporter } from '../../src/mcp/progress.js';
 
 describe('progress notification', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -43,9 +43,5 @@ describe('progress notification', () => {
     expect(sent.at(-1)).toBe('helper · running · 35s');
     expect(sent.slice(1).some((m) => m.includes('waiting'))).toBe(false);
     reporter.stop();
-  });
-
-  it('formats elapsed time', () => {
-    expect(formatElapsed(65_000)).toBe('1m05s');
   });
 });

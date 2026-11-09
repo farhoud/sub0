@@ -4,23 +4,12 @@
 // tool and its target path for tool activity, and the elapsed time. Never agent
 // text, tool output, other tool arguments, the stderr tail or skill content.
 import type { ChildRunState, DomainEvent } from '../core/types.js';
+import { describeEvent, formatElapsed } from '../service/status-text.js';
 
 export interface ProgressOptions {
   minIntervalMs?: number;
   heartbeatMs?: number;
   now?: () => number;
-}
-
-export function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return minutes > 0 ? `${minutes}m${String(seconds).padStart(2, '0')}s` : `${seconds}s`;
-}
-
-export function describeEvent(event: DomainEvent): string {
-  if (event.kind === 'tool_activity') return [event.kind, event.tool, event.path].filter(Boolean).join(' ');
-  return event.kind;
 }
 
 export class ProgressReporter {

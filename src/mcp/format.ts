@@ -1,10 +1,9 @@
-// @sigil implements design/mcp-server.sigil McpServer (bounded tool results, status line)
+// @sigil implements design/mcp-server.sigil McpServer (bounded tool results, listing)
 //
-// The one owner of the wording of a task's state: every reply that tells a parent
-// whether a child has started comes through formatStatusLine.
-import { isUnavailable, type Measure, type Result, type SessionUsage } from '../core/types.js';
+// What is specific to the MCP tool replies: the bound, the equal share of an await
+// reply and the listing cap. The wording of a task's state comes from the service.
 import type { CollectReply, DelegateReply, TaskListing } from '../service/delegation-service.js';
-import { formatElapsed } from './progress.js';
+import { formatResult, formatStatusLine, listingStatus, statusFacts, withNotice } from '../service/status-text.js';
 
 /** No tool result may exceed this, whatever it holds. */
 export const TOOL_RESULT_LIMIT = 12_000;
@@ -12,63 +11,6 @@ export const LISTING_CAP = 50;
 
 export function bound(text: string): string {
   return text.length <= TOOL_RESULT_LIMIT ? text : `${text.slice(0, TOOL_RESULT_LIMIT - 40)}\n[subzero: output bounded]`;
-}
-
-function show(value: Measure, digits = 0): string {
-  if (isUnavailable(value)) return 'unavailable';
-  return digits > 0 ? value.toFixed(digits) : String(value);
-}
-
-export function formatUsage(usage: SessionUsage): string {
-  return [
-    `tokens ${show(usage.totalTokens)} (in ${show(usage.inputTokens)}, out ${show(usage.outputTokens)})`,
-    `cost ${show(usage.cost, 4)}`,
-    `context at settle ${show(usage.contextTokens)}/${show(usage.contextWindow)}`,
-  ].join(' · ');
-}
-
-/** The task id comes first so it survives compaction of the parent's history. */
-export function formatResult(result: Result): string {
-  const head = [`task: ${result.taskId}`, result.agent, `status: ${result.status}`];
-  if (result.failureKind !== undefined) head.push(`failure: ${result.failureKind}`);
-  const lines = [head.join(' · ')];
-  if (result.message !== undefined) lines.push(`message: ${result.message}`);
-  if (result.summary !== undefined) lines.push('summary:', result.summary === '' ? '(empty)' : result.summary);
-  if (result.usage !== undefined) {
-    const duration = result.durationMs !== undefined ? ` · duration ${Math.round(result.durationMs / 1000)}s` : '';
-    lines.push(`usage: ${formatUsage(result.usage)}${duration}`);
-  }
-  return bound(lines.join('\n'));
-}
-
-/** What a reader knows of a task that has no result yet. */
-export type StatusFacts =
-  | { state: 'queued'; endpoint?: string; place?: number; enqueuedAt: string }
-  | { state: 'running'; startedAt: string };
-
-/** A task with a start time is running; a task without one has not launched, whatever its stored status says. */
-export function statusFacts(task: { startedAt?: string; endpoint?: string; queuePlace?: number; createdAt: string }): StatusFacts {
-  if (task.startedAt !== undefined) return { state: 'running', startedAt: task.startedAt };
-  return {
-    state: 'queued',
-    ...(task.endpoint !== undefined ? { endpoint: task.endpoint } : {}),
-    ...(task.queuePlace !== undefined ? { place: task.queuePlace } : {}),
-    enqueuedAt: task.createdAt,
-  };
-}
-
-/** The status line of a task with no result: queued with its place and wait, or running with its start time. */
-export function formatStatusLine(facts: StatusFacts, now = Date.now()): string {
-  if (facts.state === 'running') {
-    return `running, started ${facts.startedAt} (${formatElapsed(now - Date.parse(facts.startedAt))} ago)`;
-  }
-  const waiting = formatElapsed(now - Date.parse(facts.enqueuedAt));
-  const endpoint = facts.endpoint ?? 'unknown';
-  const where =
-    facts.place !== undefined
-      ? `place ${facts.place} in this session's queue, waiting ${waiting}`
-      : `in another session's queue, waiting ${waiting}`;
-  return `queued, not launched yet: no child is running; it starts when endpoint ${endpoint} has room (${where})`;
 }
 
 /** The status line of a reply that carries no result, or undefined for the other kinds of reply. */
@@ -96,14 +38,6 @@ function replyStatusLine(reply: DelegateReply | CollectReply, now: number): stri
   }
 }
 
-/** Put a notice on the line after the first one, so the task id still comes first. */
-export function withNotice(text: string, notice: string | undefined): string {
-  if (notice === undefined) return text;
-  const newline = text.indexOf('\n');
-  const line = `notice: ${notice}`;
-  return newline < 0 ? `${text}\n${line}` : `${text.slice(0, newline)}\n${line}${text.slice(newline)}`;
-}
-
 /** One reply of delegate, tasks, await or cancel about one task, with the task id first. */
 export function describeReply(reply: DelegateReply | CollectReply, view?: { agent: string; createdAt: string }, now = Date.now()): string {
   return withNotice(describeOne(reply, view, now), 'notice' in reply ? reply.notice : undefined);
@@ -127,7 +61,7 @@ export function sectionShare(count: number): number {
 }
 
 function describeOne(reply: DelegateReply | CollectReply, view: { agent: string; createdAt: string } | undefined, now: number): string {
-  if (reply.kind === 'result') return formatResult(reply.result);
+  if (reply.kind === 'result') return bound(formatResult(reply.result));
   const id = `task: ${reply.taskId}`;
   const lead = view !== undefined ? `${id} · ${view.agent}` : id;
   const line = replyStatusLine(reply, now);
@@ -144,11 +78,6 @@ function describeOne(reply: DelegateReply | CollectReply, view: { agent: string;
     case 'not_found':
       return `${id} · no such task`;
   }
-}
-
-/** The row of a listing: queued or running by its status line, anything else by its stored status. */
-export function listingStatus(t: TaskListing, now = Date.now()): string {
-  return t.status === 'running' ? formatStatusLine(statusFacts(t), now) : t.status;
 }
 
 /**

@@ -25,10 +25,9 @@ import {
   type ThinkingLevel,
 } from '../config/agent-config.js';
 import { isTaskId } from '../core/ids.js';
-import { formatResult, formatStatusLine, listingStatus, statusFacts, withNotice } from '../mcp/format.js';
-import { describeEvent } from '../mcp/progress.js';
 import { UnsupportedHostError } from '../kernel/kernel.js';
 import { DelegationService, EmptyBriefError, type DelegationServiceOptions } from '../service/delegation-service.js';
+import { describeEvent, formatResult, formatStatusLine, listingStatus, statusFacts, withNotice } from '../service/status-text.js';
 
 export interface CliIo {
   out: (text: string) => void;

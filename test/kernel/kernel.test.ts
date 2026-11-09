@@ -114,6 +114,16 @@ describe('the seams of the core', () => {
     expect(offenders).toEqual([]);
   });
 
+  it('imports nothing from a parent adapter or the routing hooks into the core, the services and the command line', () => {
+    const checked = ['cli', 'core', 'store', 'service', 'config', 'kernel'].flatMap((d) => sourceFiles(path.join(SRC, d)));
+    expect(checked.length).toBeGreaterThan(8);
+    const forbidden = [path.join(SRC, 'mcp'), path.join(SRC, 'routing')];
+    const offenders = checked.filter((file) =>
+      specifiers(file).some((s) => s.startsWith('.') && forbidden.some((dir) => path.resolve(path.dirname(file), s).startsWith(dir))),
+    );
+    expect(offenders).toEqual([]);
+  });
+
   it('keeps the entry points as the only place that registers PiDriver', () => {
     for (const entry of [path.join(SRC, 'cli', 'main.ts'), path.join(SRC, 'mcp', 'main.ts')]) {
       expect(specifiers(entry)).toContain('../pi/driver.js');
