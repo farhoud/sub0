@@ -1,9 +1,10 @@
 @design/task-core.sigil from TaskCore import {
   task, task id, child run, child run state, domain event, result, launch spec,
+    enqueue time, start time, child session, child driver,
 }
-@design/pi-driver.sigil from PiDriver import { child session, skill overlay }
+@design/delegation-service.sigil from DelegationService import { queued task }
 @design/agent-config.sigil from AgentConfig import {
-  agent definition, project root,
+  agent definition, project root, model endpoint,
 }
 
 component TaskStore {
@@ -19,7 +20,11 @@ component TaskStore {
     child run has started, the launch spec, the *event log* events.jsonl, and
     turns/1.json with the exact result the parent received. A task whose child run
     failed before it started has no launch spec. The same directory also holds the
-    skill overlay of the task, which TaskStore neither writes nor removes.
+    *driver files* of the task, which are what its child driver keeps there beside
+    the task record and which TaskStore neither writes nor removes.
+
+    A task record also keeps the model endpoint and the enqueue time of its task
+    from its first write, and the start time once its child run is released.
 
     The *task status* of a task is running while its child run state is Pending,
     Starting or Live. It then becomes the status of its result, which is completed,
@@ -69,6 +74,15 @@ component TaskStore {
     task status. A later abandoned line for a task whose task record holds a
     result must be ignored by every reader and never rewritten.
 
+    TaskStore must never store a queued task as a task status of its own. A
+    task whose task record has
+    no start time and no result keeps the task status running until the
+    start-up sweep marks it abandoned, so that the sweep and every listing
+    read it as they read any running task.
+
+    The start time must be kept where a reader in another process sees it
+    through the task index or the task record, from the moment of the release.
+
     TaskStore must receive the project root from its caller and must not resolve
     one of its own, so that the store folder is the one the start-up sweep read.
 
@@ -97,6 +111,11 @@ component TaskStore {
     result, and a sweep that appended an abandoned line after the settled line
     leaves it settled.
 
+    The start time written at the release of a child run is read back by a
+    listing in a second process, and a task whose child run is Pending in a
+    dead owner process is marked abandoned by the next start-up sweep, because
+    its task status is running.
+
     The first write of a task record creates the store folder with its own
     .gitignore, and in a git repository nothing in it shows in git status while the
     user's own .gitignore is unchanged.
@@ -109,11 +128,15 @@ component TaskStore {
 
     Append each domain event to the event log of its task.
 
+    Provide the model endpoint, the enqueue time and the start time of each
+    task record to a reader in any process.
+
     List the task records of one parent session id, or of every parent session id,
     using the task index, each with its task status.
 
     TaskStore provides the sessions folder, where the child session of each task is
-    kept.
+    kept, and the folder of the driver files of each task beside its task record,
+    for TaskCore to hand to the child driver of that task.
 
     Run the start-up sweep for a caller at its start-up and whenever it asks
     again, and mark each task whose owner process is gone as abandoned.

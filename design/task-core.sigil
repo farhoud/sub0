@@ -1,8 +1,9 @@
 @design/agent-config.sigil from AgentConfig import {
-  agent definition, tool list, thinking level,
+  agent definition, tool list, thinking level, model endpoint, timeout,
+  project root, general agent, fallback agent,
 }
 @design/task-store.sigil from TaskStore import {
-  task record, event log, parent session id,
+  task record, event log, parent session id, sessions folder, driver files,
 }
 
 component TaskCore {
@@ -16,6 +17,10 @@ component TaskCore {
     *brief* and one *child run*. A task id is sz- followed by six base32
     characters. The brief is the one self-contained text that the child receives,
     and the child sees nothing else of the parent conversation.
+
+    A task also holds its *enqueue time*, the time it was created, and, once its
+    caller has released its child run, its *start time*, the time of that
+    release.
 
     A child run has a *child run state*. It is Pending until its caller
     releases it, then moves through Starting and Live to Settled, and it can
@@ -45,17 +50,24 @@ component TaskCore {
     activity carries the tool name and its target path, and the run started event
     carries the launch spec of the child run. Each domain event is written to the
     event log of its task.
+
+    A *child session* is the record of the child's own conversation that its
+    child driver keeps for a task, in the sessions folder that TaskStore provides.
   }
 
   logic {
     On a task request, create the task with a new task id, the frozen
-    agent definition and the brief, and write the task record with the status
-    running. The task id goes to the result and to the child port, and the
-    agent definition goes to the child port. The task record goes to the final
+    agent definition, the brief and the enqueue time, and write the task record
+    with the status running, the model endpoint of the agent definition and the
+    enqueue time. The task id goes to the result and to the child port, and the
+    agent definition goes to the child port with the project root, the sessions
+    folder and the folder of the driver files of the task. The task record goes to
+    the final
     step, which writes the result into it. Keep the child run Pending until its
-    caller releases it. Check that the task holds exactly one brief, and pass
-    that brief to the child port when the child run is released, which starts
-    the child run and ends this part of the flow.
+    caller releases it. On release, take the start time, write it into the
+    task record and go on to the brief check. The brief check confirms that the
+    task holds exactly one brief and passes that brief to the child port, which
+    starts the child run and ends this part of the flow.
 
     While the child run is live, write each domain event to the event log and offer
     it to the caller, which ends that branch. When the run started event arrives,
@@ -74,8 +86,9 @@ component TaskCore {
     result.
 
     TaskCore must reach a child only through the *child port* and must not import
-    host-specific types. TaskCore requires the child port, which a child driver
-    provides, and does not depend on any child driver.
+    host-specific types. TaskCore requires the child port of the host of the
+    agent definition, which a child driver provides and its caller hands over, and
+    does not depend on any particular child driver.
 
     TaskCore requires the task record and depends on TaskStore, which provides
     it. Only TaskCore may ask TaskStore to write a task record, and TaskStore
@@ -106,6 +119,10 @@ component TaskCore {
     the task record is plain text, and TaskCore must write the launch spec into the
     task record unread and must not depend on any flag that it holds.
 
+    The start time must be taken when the caller releases the child run and
+    never read from the launch spec, and a child run that is still Pending
+    has no start time.
+
     TaskCore owns one brief for each task in the spike, so continue, ask, fork and
     rerun are not offered.
   }
@@ -119,26 +136,46 @@ component TaskCore {
 
     The run started event of a child run puts its launch spec in the task record
     before the child run settles.
+
+    A task whose child run stays Pending longer than its timeout still runs once
+    it is released, and its start time is later than its enqueue time.
   }
 
   interface {
-    Accept a task request made of an agent definition, a brief and an optional
-    parent session id. Return the result, which never carries the transcript, with
+    Accept a task request made of an agent definition, a brief, the child port of
+    the host of the agent definition and an optional parent session id. Return the
+    result, which never carries the transcript, with
     the task id first once the child run settles, or let the caller leave the task
     running and ask for its result later. A child run stays in the
     child run state Pending until its caller releases it, so that the caller can
     limit how many child runs run at the same time.
+
+    Offer the child run state, the enqueue time and the start time of a live
+    task to the caller, so that it can tell a Pending child run from a released
+    one.
 
     Cancel a live child run as cancelled, and return the result.
 
     Offer each domain event of a live child run to the caller as it happens, and
     offer a failure kind in the result of a failed child run.
 
-    Define the child port that a child driver implements: start a child run for a
-    task id, an agent definition and a brief, hand its launch spec to the caller in
-    the run started domain event, run it to settlement, cancel it, and report the
-    outcome, which is the last assistant text, the status, the failure kind of a
-    failed run and the session usage.
+    Define the child port that a *child driver* implements: start a child run for a
+    task id, an agent definition, a brief, the project root, the sessions folder
+    and the folder of the driver files of the task, so that a child driver resolves
+    none of these itself and reads no task record. Hand its launch spec to the
+    caller in the run started domain event, run it to settlement, cancel it, and
+    report the outcome, which is the last assistant text, the status, the failure
+    kind of a failed run and the session usage.
+
+    A child driver may also offer an *attach command* that reopens the
+    child session of a task in the terminal interface of its child program, built
+    from the launch spec of the task, a *session export* that writes the
+    child session of a task as a document that a person can read, and its
+    *starter tools*, which are the tool list that suits a general agent on its host
+    and the tool list that only reads and suits a fallback agent on its host. A
+    caller must ask for any of the three through the child driver of the host of
+    the
+    task or of the agent, and must not assume that a child driver offers it.
   }
 
   decisions {
@@ -146,7 +183,8 @@ component TaskCore {
     single request, and the experiment does not need follow-up turns. Cancelled is
     a status and not a failure kind, because a failure kind belongs to a failed
     result that a parent received. The launch spec is a shape of TaskCore and not
-    of the pi driver, so that TaskCore, TaskStore and Cli carry no pi type. The
+    of any child driver, so that TaskCore, TaskStore and Cli carry no driver type.
+    The
     result budget is fixed because an
     agent definition has no field for another value, and TaskCore keeps no list of
     changed files because git is the record and the review of concurrent writers is

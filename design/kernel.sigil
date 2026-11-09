@@ -1,0 +1,104 @@
+@design/task-core.sigil from TaskCore import {
+  child driver, child port, attach command, session export, starter tools,
+}
+@design/delegation-service.sigil from DelegationService import { delegation }
+
+component Kernel {
+  goal {
+    Keep the core of subzero small and free of any one child driver or
+    parent adapter: child drivers and parent adapters plug in through Kernel, and
+    core services reach a child driver only through it and never reach a parent
+    adapter.
+  }
+
+  state {
+    The *driver registry* maps each *host* name to the one child driver registered
+    for that host. A *supported host* is a host name that has an entry in the
+    driver registry.
+
+    A *parent adapter* is an extension that connects one kind of parent, such as a
+    Claude Code session, to the core. Kernel keeps the names of the registered
+    parent adapters only to refuse a second registration of a name.
+
+    An *entry point* is the start-up code of one process, such as the command
+    line, the MCP server or a hook. It is outside the core, it is the code of a
+    process that imports a particular child driver or parent adapter in order to
+    register it, and it imports the ones its process needs, which may be none, and
+    registers them with Kernel before the process takes its first request.
+  }
+
+  constraints {
+    Kernel must not name, import or depend on any particular child driver or
+    parent adapter. An entry point registers each of them with Kernel, and Kernel
+    loads none of them by name. A child driver or a parent adapter that no entry
+    point of a process registers is absent from that process.
+
+    The driver registry must hold at most one child driver for a host. A second
+    registration for a host must be refused with an error that names the host, and
+    it must not replace the first child driver.
+
+    A parent adapter must reach the core only through the delegation of
+    DelegationService, and its collect, cancel and listing, and through AgentConfig
+    for what it shows or decides, such as
+    the agent file, the routable tiers, the routing settings and the error texts,
+    and through Kernel only to list the supported hosts that it gives AgentConfig,
+    and it must never be given a child driver. A parent adapter of one parent may
+    depend on another parent adapter of the same parent. A child driver must never
+    be given a parent adapter.
+
+    No core service may name a particular child driver or parent adapter, or import
+    from one. A core service reaches a child driver only through the child port
+    that Kernel provides for a host, and the attach command, the session export and
+    the starter tools that it offers.
+  }
+
+  cases {
+    With the pi child driver registered for the host pi, the driver registry holds
+    pi as a supported host, and a request for the child port of the host pi returns
+    the child port of that child driver.
+
+    A request for the child port of a host with no registered child driver returns
+    an error that names that host and lists every supported host, and it starts no
+    child run.
+
+    A second child driver registered for the host pi is refused with an error that
+    names pi, and the first child driver stays registered.
+
+    A parent adapter registered under a name that another parent adapter already
+    holds is refused with an error that names that name.
+
+    In a process whose entry point registers no child driver for the host pi, a
+    request for the child port of the host pi returns the error for a host with no
+    registered child driver, although another process may support pi.
+  }
+
+  interface {
+    Register a child driver for a host in the driver registry, refusing a second
+    child driver for the same host.
+
+    Provide the child port of the child driver registered for a host, and its
+    attach command, its session export and its starter tools when that child driver
+    offers them, and return an error that names the host and lists every
+    supported host when no
+    child driver is registered for it.
+
+    List every supported host, so that a caller can check a host or name the
+    supported hosts in an error.
+
+    Register a parent adapter by name, refusing a second parent adapter of the same
+    name.
+
+    Take the registrations of an entry point, which registers every child driver
+    and parent adapter its process needs before the process takes its first
+    request.
+  }
+
+  decisions {
+    Child drivers and parent adapters will keep multiplying, such as Claude and
+    Codex children and pi or Codex parents. Registering each of them with a small
+    Kernel, instead of letting a core service name one, keeps the core unchanged
+    when one is added and lets the child port and the delegation stay the only
+    seams. The driver registry holds one child driver for each host so that a
+    lookup by the host of an agent definition is never ambiguous.
+  }
+}

@@ -1,11 +1,16 @@
 @design/task-core.sigil from TaskCore import {
   task id, brief, child run, failure kind, domain event, child port, session usage,
-  launch spec,
+    launch spec, attach command, child session, session export, child driver,
+    starter tools,
 }
 @design/agent-config.sigil from AgentConfig import {
   agent definition, skill folder, project root, timeout, thinking level,
+  tool list, general agent, fallback agent,
 }
-@design/task-store.sigil from TaskStore import { task record, sessions folder }
+@design/task-store.sigil from TaskStore import {
+  task record, sessions folder, driver files,
+}
+@design/kernel.sigil from Kernel import { driver registry, entry point, host }
 
 component PiDriver {
   goal {
@@ -19,12 +24,14 @@ component PiDriver {
     variables, the pi version, its skill folder paths and the thinking level of
     the agent definition.
 
-    A *skill overlay* is a folder at .agents/subzero/tasks/<task id>/skills/, owned
-    by PiDriver and not part of the task record, that holds a copy of each declared
-    skill folder side by side, so that relative paths between sibling skills keep
-    working.
+    A *skill overlay* is the folder skills/ inside the folder of the driver files
+    that the child port hands over for the task. It is owned by PiDriver and is not
+    part of the task record, and it holds a copy of each declared skill folder side
+    by side, so that relative paths between sibling skills keep working. The skill
+    overlay is among the driver files of the task.
 
-    A *child session* is the pi conversation of one task, kept as a session file.
+    The child session of a task is the pi conversation of that task, kept as a pi
+    session file.
   }
 
   logic {
@@ -63,13 +70,14 @@ component PiDriver {
     ```
     pi --mode rpc --offline -na -ne -nc -np --no-themes -ns
        --skill <overlay>/<name> ... --model <provider/id> --thinking <level>
-       --tools <tools> --session-dir <project>/.agents/subzero/sessions
+       --tools <tools> --session-dir <sessions folder>
        --session-id <task id> --name subzero:<agent>:<task id>
     ```
 
-    PiDriver receives the project root from the delegation service when it is
-    connected, resolves none of its own, and depends on TaskStore for the
-    sessions folder. PiDriver must not write the task record, and hands the
+    PiDriver receives the project root, the sessions folder and the folder of its
+    driver files through the child port each time it starts a child run, resolves
+    none of its own, and calls neither TaskStore nor the delegation service.
+    PiDriver must not write the task record, and hands the
     launch spec to the caller so that TaskCore writes it.
 
     A child run must see exactly the declared skills and no user or project
@@ -154,12 +162,21 @@ component PiDriver {
     Hand each domain event of a live child run to the caller as it happens, with
     the tool name and its target path in the domain event of each tool activity.
 
-    Build an *attach command* from the launch spec of a task, without --mode rpc
+    Build the attach command from the launch spec of a task, without --mode rpc
     and without --session, so that the child session can be reopened in the pi
     terminal interface.
 
     Hand the launch spec of every child run to the caller in the run started
     domain event, so that the task record keeps it.
+
+    Export the child session of a task as HTML with pi --export, as the
+    session export of the child driver for the host pi.
+
+    Register with the driver registry of Kernel as the child driver for the host pi
+    when an entry point of a process registers it, and offer the attach command,
+    the session export and the starter tools through it. The starter tools are the
+    tool list read, bash, edit, write, grep, find and ls for a general agent, and
+    the tool list read, grep, find and ls for a fallback agent.
   }
 
   decisions {

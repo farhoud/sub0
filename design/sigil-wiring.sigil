@@ -1,6 +1,7 @@
 @design/delegation-service.sigil from DelegationService import { delegation, brief text }
 @design/agent-config.sigil from AgentConfig import {
-  agent definition, skill folder, thinking level, tool list, model endpoint,
+    agent definition, agent entry, agent file, default tier, skill folder,
+  thinking level, tool list, model endpoint,
   parallel limit,
 }
 @design/mcp-server.sigil from McpServer import { allow rule }
@@ -26,12 +27,14 @@ component SigilWiring {
     with the sigil skills. The *interpreter agent* reads one prepared source and
     writes its claim rows to the *answer file* that its brief text names.
 
-    The sigil-interpreter agent definition is a pi agent on the r9700/Qwen3.8 model
-    at the thinking level high, with the sigil-understand and sigil-egglog skills
-    and the tools read, grep, find, ls and write. The sigil-interpreter-control
-    agent definition is the same on the Claude model of A's interpreters, also at
-    the thinking level high. The sigil-interpreter-low agent definition is the same
-    as sigil-interpreter at the thinking level low.
+    The agent file holds three model tiers on the host pi: the default tier on the
+    r9700/Qwen3.8 model at the thinking level high, the tier low on that model at
+    the thinking level low, and the tier control on the Claude model of A's
+    interpreters at the thinking level high. The sigil-interpreter agent entry runs
+    on the default tier with the sigil-understand and sigil-egglog skills and
+    the tools read, grep, find, ls and write. The sigil-interpreter-low agent entry
+    is the same on the tier low, and the sigil-interpreter-control agent entry is
+    the same on the tier control.
   }
 
   constraints {
@@ -71,7 +74,7 @@ component SigilWiring {
 
   interface {
     Provide a sigil-interpreter, a sigil-interpreter-control and a
-    sigil-interpreter-low agent definition in examples/sigil/.agents/subzero.yaml,
+    sigil-interpreter-low agent entry in examples/sigil/.agents/subzero.yaml,
     whose skill folder entries point at the staged sigil skills of the
     pass directory, without modifying the sigil repository. The same file holds
     an endpoints entry for the model endpoint r9700 with a parallel limit of 1, so

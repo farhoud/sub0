@@ -1,28 +1,43 @@
 @design/task-core.sigil from TaskCore import {
   task, task id, brief, child run, result, domain event, child port,
+  child run state, enqueue time, start time, child driver,
 }
 @design/agent-config.sigil from AgentConfig import {
-  agent definition, project root, unknown agent error, load error,
-  unresolved root error, model endpoint, parallel limit,
+  agent definition, project root, unknown agent error, load error, tool list,
+  unresolved root error, model endpoint, parallel limit, general agent,
+    model tier, tier error, agent file, timeout, agents map,
+  fallback agent,
 }
 @design/task-store.sigil from TaskStore import {
-  task record, task status, parent session id, start-up sweep,
+  task record, task status, parent session id, start-up sweep, task index,
+}
+@design/kernel.sigil from Kernel import {
+  driver registry, parent adapter, supported host, host,
 }
 
 component DelegationService {
   goal {
-    Give every front end one entry that is ready to delegate: it turns a named
-    agent and a brief into a task, finds a live task by its task id later, and
-    starts clean after an earlier process has died.
+    Give every *front end* one entry that is ready to delegate: it turns a named
+    agent, a model tier or neither, and a brief into a task, finds a live task
+    by its task id later, and starts clean after an earlier process has died.
   }
 
   state {
-    A *delegation* is the request of a front end. It holds an agent name, a
-    *brief text*, optional files, an optional expected output and an optional
-    parent session id.
+    A *delegation* is the request of a front end. It holds an optional agent
+    name, an optional model tier, a *brief text*, optional files, an optional
+    expected output and an optional parent session id.
 
     The *live task registry* holds the tasks that this process has started, by
     their task id.
+
+    A *queued task* is a task whose child run is Pending in this process, or a task
+    of another process whose task status is running and that has no start time.
+    Queued is a view that DelegationService derives on each reply from the live
+    task and the task record, and it is never a stored task status.
+
+    The *queue place* of a child run whose child run state is Pending is its
+    position, counted from 1, among the Pending child runs of its
+    model endpoint in this process, in the order they arrived.
   }
 
   logic {
@@ -32,24 +47,49 @@ component DelegationService {
     again and returns the unresolved root error to its caller, with no task
     made, until one resolves. Once a project root resolves, keep it for the
     process, run the start-up sweep with it, and connect TaskCore to the
-    child port and the task record, each from the component that provides it
-    and each given that project root. The start-up ends when the sweep has
+    task record, given that project root. The start-up ends when the sweep has
     finished and TaskCore is connected.
 
-    On a delegation, load the agent definitions again and look up the agent
-    name. When the load fails, return the load error to the caller and end the
-    flow with no task made. When the name is unknown, return the
-    unknown agent error to the caller and end the flow with no task made.
-    Otherwise render the files and the expected output after the brief text
-    into one brief, start the task in TaskCore with its agent definition, that
-    brief and the parent session id, and add the task to the
-    live task registry, which a later collect or cancel reads. When the child
-    runs of its model endpoint in this process that are Starting or Live have
-    reached its parallel limit, keep the child run Pending and release it,
-    first come first served, when one of them ends, and otherwise release it at
-    once. When the caller waits, offer each domain event to the caller and
-    return the result when the child run settles, which ends the flow. When the
-    caller does not wait, return the task id at once, which ends the flow.
+    On a delegation, load the agent entries again, giving AgentConfig each
+    supported host that the driver registry lists. When the load fails,
+    return the load error to the caller and end the flow with no task made.
+    First choose the agent. When the delegation names no agent or names the agent
+    general, take the general agent, and when no general agent is configured return
+    the unknown agent error to the caller and end the flow with no task made. When
+    it names another agent, look up that name in the agents map. A name that finds
+    the fallback agent in that lookup runs it and reports nothing about a name not
+    configured. When the name is unknown, take the fallback agent and report in the
+    reply that the named agent is not configured, and when no fallback agent is
+    configured return the unknown agent error to the caller and end the flow with
+    no task made. Then choose the model tier: when the delegation names one, drop a
+    leading tier: from it, and ask AgentConfig for the agent definition of the
+    chosen agent at that model tier, or else at the agent's own tier or the default
+    tier. When AgentConfig returns the tier error for that agent at that
+    model tier, return it to the caller and end the flow with no task made. The
+    task records its agent as the
+    name of the chosen agent, followed by :<tier> when the delegation names a
+    model tier.
+
+    With the agent definition found, ask the driver registry for the child port of
+    its host, and when no child driver is registered for that host, return the
+    error of the driver registry to the caller and end the flow with no task made.
+    A driver registry that lists no supported host gives AgentConfig an empty list
+    of supported hosts, so a request that resolves to any tier gives the tier
+    error that names the host and lists no supported host, before the driver
+    registry is asked, and no task is made.
+    Otherwise render the files and the expected output after the brief text into
+    one brief, start the task in TaskCore with that agent definition, that brief,
+    that child port and the parent session id, and add the task to
+    the live task registry, which a later collect or cancel reads. When the
+    child runs of its model endpoint in this process that are Starting or Live
+    have reached its parallel limit, keep the child run Pending at the next
+    queue place and release it, first come first served, when one of them ends,
+    and otherwise release it at once. When the caller waits, offer each
+    domain event to the caller and return the result when the child run
+    settles, which ends the flow. When the caller does not wait, return the
+    task id at once with the start time of a released child run, or with the
+    model endpoint, the queue place and the enqueue time of a Pending one,
+    which ends the flow.
 
     Before a collect, a cancel or a listing, run the start-up sweep again, so
     that a task whose owner process died after start-up is not shown as
@@ -58,17 +98,37 @@ component DelegationService {
     result of a settled task or the task status of an abandoned one. A task
     with a stored result gives that result, and a task whose task status is
     abandoned gives no result and says that it is abandoned, which ends the
-    flow. A cancel of a task that has already settled returns its stored result
-    unchanged, which ends the flow. A collect or a cancel of a task whose
-    task status is running and that is not in the live task registry reports
-    that the task runs in another process and cannot be cancelled here, and
-    changes nothing, which ends the flow.
+    flow. A collect of a task in the live task registry that has not settled
+    gives no result and returns its start time, or its model endpoint,
+    queue place and enqueue time while it is Pending, which ends the flow. A
+    cancel of a task that has already settled returns its stored result
+    unchanged, which ends the flow. A cancel of a Pending child run removes it
+    from the queue of its model endpoint, and each later Pending child run
+    moves up one queue place, which ends the flow. A collect of a task whose
+    task status is running and that is not in the live task registry gives no
+    result, returns its model endpoint, its enqueue time and its start time
+    when one is recorded, read from the task record, and says that the task
+    belongs to another process, which ends the flow. A cancel of such a task
+    reports that it belongs to another process and cannot be cancelled here,
+    and changes nothing, which ends the flow.
   }
 
   constraints {
-    DelegationService must create no task or task record when the agent name is
-    unknown or the agent definitions fail to load, and it must load the agent
-    definitions again on each delegation.
+    DelegationService must create no task or task record when no child driver is
+    registered for the host of the agent definition, when the agent name is
+    unknown and no fallback agent is configured, when no agent is named or the
+    agent general is named and no general agent is configured, AgentConfig returns
+    the tier error, or the agent entries fail to load, and it must load the agent
+    entries again on each delegation.
+
+    A delegation that names an agent other than general must find that agent in the
+    agents map and run it at the model tier that the delegation names, else at its
+    own tier or the default tier,
+    except that a name missing from the agents map runs
+    the fallback agent when a fallback agent is configured, and its replies report
+    it queued or
+    started like any
+    other delegation.
 
     The brief that the service renders must start with the brief text unchanged,
     followed by a Files section and an Expected output section only when they are
@@ -82,9 +142,12 @@ component DelegationService {
     agent file, the task record and the child run must all use that same
     project root, which must not change once it is resolved. No other component
     may call for a project root for its own use, and each receives it from
-    DelegationService. A call made before the project root is resolved must
-    return the unresolved root error and must create no task, task record or
-    index line.
+    DelegationService, with one exception: a parent adapter that runs in a process
+    where no DelegationService starts reads the agent file under the project root
+    that its parent reports, because it has no DelegationService to ask. A call
+    made before the
+    project root is resolved must return the unresolved root error and must
+    create no task, task record or line of the task index.
 
     The live task registry must hold no state beyond this process, and the
     task record stays the only durable state of a task.
@@ -96,15 +159,32 @@ component DelegationService {
     delegation from a command line process or from another session is not
     counted, and nothing may signal or lock across processes to enforce it.
 
-    DelegationService depends on TaskCore for the task, on PiDriver for the
-    child port, on AgentConfig for the agent definition and the project root,
-    and on TaskStore for the task record, the task status and the
-    start-up sweep.
+    A child run that is Pending must be returned with its queue place and its
+    enqueue time and never with a start time, and the time it waits must not
+    count toward its timeout.
+
+    DelegationService depends on TaskCore for the task, on the driver registry of
+    Kernel for the child port of the host of an agent definition, on AgentConfig
+    for the agent definition, the general agent, the fallback agent, the tier error
+    and the project root, and on TaskStore for the task record, the
+    task status and the start-up sweep. It must not depend on any particular
+    child driver or parent adapter, and it names no host, because more of both will
+    come and
+    each plugs in through Kernel.
   }
 
   cases {
-    A delegation with an unknown agent name returns the unknown agent error and
-    writes no task record.
+    A delegation with an unknown agent name, in an agent file with no
+    fallback agent, returns the unknown agent error and writes no task record. A
+    delegation that names the agent general, in an agent file with a fallback agent
+    and no general agent, returns the unknown agent error and writes no
+    task record, and runs no fallback agent.
+
+    A delegation with an unknown agent name, in an agent file with a
+    fallback agent, runs the fallback agent with its own tool list, records its
+    agent as fallback, and its reply says that the named agent is not configured. A
+    delegation that names the agent fallback runs the same agent and records the
+    same agent, and its reply does not say that a name is not configured.
 
     A call made before any project root is known returns the
     unresolved root error and writes nothing, and the first call after a
@@ -118,6 +198,24 @@ component DelegationService {
     whether it settles, fails by timeout or is cancelled, and is then released,
     and a cancel of the second while it is Pending starts no child.
 
+    Three delegations that do not wait, on a model endpoint whose
+    parallel limit is 1, return the first with its start time and the second
+    and third Pending at queue place 1 and 2. Cancelling the second moves the
+    third to queue place 1.
+
+    A delegation with the model tier medium starts the general agent on the host,
+    model and thinking level of that model tier and records the agent definition
+    general:medium, and tier:medium gives the same task. A delegation with no agent
+    and no model tier runs the general agent with its full tool list and records
+    its agent as general, and a delegation that names the agent general and no
+    model tier does the same.
+
+    A delegation with a model tier that is not configured returns the tier error
+    and writes no task record. A delegation that names the agent reviewer and the
+    model tier large runs reviewer on large, with reviewer's tier override for
+    large when it has one, and records reviewer:large, and a delegation that names
+    reviewer and no model tier runs it on its own tier and records reviewer.
+
     A delegation with files and an expected output gives a brief that starts with
     the brief text, then lists the files and the expected output.
 
@@ -128,28 +226,47 @@ component DelegationService {
     A collect by task id after the server restarted returns the stored result of a
     settled task, and says that an abandoned task has no result.
 
-    A cancel of a running task that another process owns reports that it runs in
-    another process, signals no process and leaves the task status running.
+    A cancel of a running task that another process owns reports that it belongs
+    to another process, signals no process and leaves the task status running.
   }
 
   interface {
-    Accept a delegation, refuse it when its brief text is empty, and return the
-    result with the task id first once the child run settles, or return the task id
-    at once when the caller does not wait.
+    Accept a delegation with an optional agent name and an optional model tier,
+    refuse it when its brief text is empty, and return the result with the
+    task id first once the child run settles, or return the task id at once
+    when the caller does not wait, with the start time of a released child run,
+    or the model endpoint, the queue place and the enqueue time of a Pending
+    one. When the named agent is not configured and the fallback agent runs
+    instead, return the report that the named agent is not configured with
+    the task id, whether or not the caller waits.
+
+    Report each queued task by its model endpoint, by its queue place when it is a
+    task of this process, and by the time it has waited, and never as started.
 
     Offer each domain event of the child run of a waited delegation to the caller
     as it happens.
 
-    Let a caller collect the result of a task by task id, returning nothing
-    while its task status is running, and let a caller cancel a task by
-    task id.
+    Hand the project root, once resolved, to the front end that started the
+    service, for that front end's own use, and never resolve a different one.
+
+    Let a caller collect the result of a task by task id, returning no result
+    while its task status is running, but its start time, or its model endpoint,
+    queue place and enqueue time while it is Pending, and let a caller cancel a
+    task by task id.
+
+    Let a caller wait up to a bound for a task by task id, and answer as a collect
+    does when the bound passes with the task still unsettled or queued.
+
+    Give a front end each supported host that the driver registry lists, so that
+    it can describe the routable tiers without being given a child driver.
 
     Keep a delegation Pending while its model endpoint has reached its
     parallel limit, and release it first come first served.
 
     List the tasks of one parent session id, or of every parent session id,
-    each with its task id, its agent, its task status and the time it was
-    created, after running the start-up sweep again.
+    each with its task id, its agent, its task status, the time it was
+    created, its start time when one is recorded and its queue place while it
+    is Pending in this process, after running the start-up sweep again.
   }
 
   decisions {
@@ -158,5 +275,15 @@ component DelegationService {
     of one for each front end. The files and the expected output are rendered into
     the brief text because the child port carries one brief, and the fields exist
     to push a parent toward a fuller brief.
+
+    A task that runs the fallback agent records its agent as fallback and not as
+    general, because its tool list is its own and not that of the general agent. A
+    task that runs the general agent without a model tier records its agent as
+    general, whether the delegation names it or names nothing.
+    A tiered task records its agent as <agent>:<tier>, so that listings, launch
+    names and the frozen agent definition show which model tier ran, and the
+    frozen definition with its model is the proof that the work was routed. The
+    queue place is counted per process because the parallel limit is, so it
+    names the place in this session's queue only.
   }
 }
