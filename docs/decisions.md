@@ -178,10 +178,52 @@ apply to the spike; the contracts win where they differ from the rest of these d
 11. Endpoint slots with lock files were removed: other agents or hosts may use the same server, and
     nothing outside one process can be controlled. Instead an optional `parallel` limit per model endpoint
     (`endpoints:`) is counted from one process's own `Starting` or `Live` children; further delegations
-    stay `Pending`, first come first served. An endpoint entry that no agent uses is a load error.
+    stay `Pending`, first come first served. An endpoint entry that no tier or override model uses is a load error.
 12. A task listing shows task id, agent, status and creation time, at most 50 tasks, running first.
 13. A collect or cancel of a running task owned by another process says so and changes nothing.
 14. The experiment has five arms; B-low runs the interpreter at thinking `low` with its own agent
     definition. The measurement row records context use at settle (not a peak), the declared thinking
     level and any interpreter write outside its answer file.
 
+15. (2026-11-09) **Microkernel.** A small Kernel holds a registry of child drivers by host and the names of parent
+    adapters. No core service, including the CLI and the Delegation service, names or imports a driver or an
+    adapter. Each process's entry point registers the ones it needs. A driver receives the project root, the
+    sessions folder and its driver-files folder through the child port and does not depend on the task store.
+    The Kernel keeps parent adapter names only to refuse a duplicate; a use for them waits for a second parent.
+16. (2026-11-09) **General and fallback agents.** A delegation that names no agent, or names `general`, runs
+    `general` with its full tools. An agent name that is not configured runs the `fallback` agent, which is a
+    config entry whose tool list `subzero init` writes read-only, and the reply says the name is not configured.
+    Without a `fallback` entry the unknown agent error stands. `general` and `fallback` are entries of
+    `agents:` with no description (see 18; their host, model and thinking come from tiers, see 21). `init` takes the tool lists from the host's child driver, so the core names no tool, and the load
+    cannot enforce read-only.
+17. (2026-11-09) **Pass-back.** When `delegate` is refused or returns a tool error with no task, Claude passes the
+    subagent back to its own Agent tool with a short description that begins with `passback`. The hook allows
+    it only when its deny memory holds that prompt, which makes it a deliberate, bounded exception to "a denied
+    prompt stays denied". A task id that came back is never passed back. A server-verified permit and a hook-side
+    host check were left for later.
+18. (2026-11-09) **Round 10 answers.** Entry points register child drivers and parent adapters, and the hook process
+    registers none; `Cli` and `McpServer` do not own their entry points. `init` takes an optional timeout (default
+    1200 seconds, CE's reviewer budget) and thinking level (default `medium`) and uses the project root that the
+    Delegation service hands over. `general` and `fallback` moved under `agents:` as entries with no description, so no
+    agent name is reserved and an explicit `fallback` runs without a "not configured" notice. `skills map` is a Tag.
+19. (2026-11-09) **Round 11 answers.** Naming `general` when no `general` entry exists returns the unknown agent error (it
+    never runs `fallback`). `subzero run` may omit the agent, which runs `general`. A parent adapter may ask the Kernel only
+    for the supported hosts it passes to the agent config load. `subzero init` passes the supported hosts to that load (superseded by 23). The
+    example cases that name pi, claude and tools stay as illustrations.
+20. (2026-11-09) **Round 12 answers.** `subzero run` and `subzero init` take their optional parts as named options (`--agent`;
+    `--host`, `--timeout`, `--thinking`), so a lone argument is always the brief or the model. `init` refuses when no
+    host is registered. `host` is a Tag owned by Kernel and `model` a Tag owned by AgentConfig, imported where used.
+21. (2026-11-09) **Tiers hold host, model and thinking.** `models.tiers` gives each tier a host, a model and a thinking
+    level, with a required `default` tier; agent entries never set them. An agent runs on the tier a call names, else its
+    own `tier:`, else `default`, and its `tiers:` block overrides a tier's fields for it alone (compose-style). Any agent
+    may take a tier (`<agent>:<tier>`), so `general` has a default plus one variant per tier. A tier whose host has no
+    driver loads, is not routable and fails only when used. CE dispatches only generic subagents with a tier, so the
+    hook still routes to `general`. Supersedes the per-host tier map of design.md §4 and the tier-only-for-general rule.
+22. (2026-11-09) **Round 13 answers.** Routable tiers exist only while `agents:` holds a `general` entry. `subzero init` refuses,
+    naming both hosts, when the file already has a `default` tier on another host. The sigil experiment file is described as
+    `default`, `low` and `control` tiers with three agents each on its tier; old agent files with host/model/thinking on an
+    agent fail the load and must be migrated (no compatibility mode). Per-host tool lists wait for a second host.
+23. (2026-11-09) **Round 14 answers.** `subzero init` no longer passes supported hosts to the load (an unsupported-host tier loads
+    anyway); it adds a missing `default` tier to a file that holds agents and refuses, naming both hosts, when the file has a
+    `default` tier on another host. The driver-registry error is kept as a defensive duplicate of the tier error and returns
+    with the same pass-back pointer. `agent name` stays plain prose.
