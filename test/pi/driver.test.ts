@@ -47,7 +47,7 @@ describe('PiDriver', () => {
     expect(outcome.usage.totalTokens).toBe(1500);
     expect(commandsSent(fake.log())).toEqual(['get_state', 'get_commands', 'prompt', 'get_last_assistant_text', 'get_session_stats']);
     expect(fake.log().find((l) => l.command === 'prompt').message).toBe('the brief');
-    expect(events.map((e) => e.kind)).toEqual(['run_started', 'skills_verified', 'agent_message', 'turn_settled']);
+    expect(events.map((e) => e.kind)).toEqual(['run_started', 'skills_verified', 'agent_message', 'turn_settled', 'run_exited']);
     const spec = (events[0] as Extract<DomainEvent, { kind: 'run_started' }>).launchSpec;
     expect(spec.cwd).toBe(root);
     expect(spec.envNames).toEqual(['PI_OFFLINE', 'PI_TELEMETRY']);
@@ -60,6 +60,38 @@ describe('PiDriver', () => {
     expect(JSON.stringify(spec)).not.toContain('the brief');
     const argv = fake.log()[0];
     expect(argv.env).toEqual({ PI_OFFLINE: '1', PI_TELEMETRY: '0' });
+  });
+
+  const exits = (events: DomainEvent[]) => events.filter((e) => e.kind === 'run_exited');
+
+  it('emits run_exited exactly once, after turn_settled, on a settled run', async () => {
+    const { start, events } = setup();
+    await start().outcome;
+    expect(exits(events)).toHaveLength(1);
+    expect(events.at(-1)!.kind).toBe('run_exited');
+  });
+
+  it('emits run_exited exactly once when the skills do not match', async () => {
+    const { start, events } = setup({ extraSkills: ['brave-search'] });
+    await start().outcome;
+    expect(exits(events)).toHaveLength(1);
+    expect(events.at(-1)!.kind).toBe('run_exited');
+  });
+
+  it('emits run_exited exactly once when pi refuses the prompt', async () => {
+    const { start, events } = setup({ refusePrompt: true });
+    await start().outcome;
+    expect(exits(events)).toHaveLength(1);
+    expect(events.at(-1)!.kind).toBe('run_exited');
+  });
+
+  it('emits run_exited exactly once on a crash and on a timeout', async () => {
+    const crash = setup({ turn: [{ exit: 3 }] });
+    await crash.start().outcome;
+    expect(exits(crash.events)).toHaveLength(1);
+    const timedOut = setup({ turn: [{ hang: true }], ignoreAbort: true, ignoreStdinEnd: true }, 'helper', { timeout: 0.6 });
+    await timedOut.start().outcome;
+    expect(exits(timedOut.events)).toHaveLength(1);
   });
 
   it('buffers message deltas into one agent message', async () => {

@@ -184,6 +184,24 @@ describe('decideAgentSpawn', () => {
     expect(decideAgentSpawn(spawnOf('p', { model: 'opus' }), ctx('s-1')).decision).toBe('deny');
   });
 
+  it('never sweeps the folder of the current session: an aged resumed session is still denied and remembered', () => {
+    const { data, ctx } = setup(config(['medium']));
+    decideAgentSpawn(spawnOf('one', { model: 'sonnet' }), ctx('resumed'));
+    decideAgentSpawn(spawnOf('one', { model: 'sonnet' }), ctx('other'));
+    const root = path.join(data, 'sessions', 'deny');
+    const folders = readdirSync(root);
+    expect(folders).toHaveLength(2);
+    const eightDays = (Date.now() - 8 * 24 * 3600 * 1000) / 1000;
+    for (const f of folders) utimesSync(path.join(root, f), eightDays, eightDays);
+
+    expect(decideAgentSpawn(spawnOf('two', { model: 'sonnet' }), ctx('resumed'))).toMatchObject({ decision: 'deny', tier: 'medium' });
+    const left = readdirSync(root);
+    expect(left).toHaveLength(1); // the other session's old folder was swept, the current one was kept
+    expect(readdirSync(path.join(root, left[0]!))).toHaveLength(2);
+    // remembered: the same prompt with an unmapped model is still denied
+    expect(decideAgentSpawn(spawnOf('two', { model: 'opus' }), ctx('resumed'))).toMatchObject({ decision: 'deny', tier: 'medium' });
+  });
+
   it('records each denial as its own create-only entry, and sweeps session folders older than seven days on a write', () => {
     const { data, ctx } = setup(config(['medium']));
     decideAgentSpawn(spawnOf('one', { model: 'sonnet' }), ctx('old-session'));

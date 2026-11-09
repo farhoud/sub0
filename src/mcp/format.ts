@@ -97,7 +97,7 @@ function replyStatusLine(reply: DelegateReply | CollectReply, now: number): stri
 }
 
 /** Put a notice on the line after the first one, so the task id still comes first. */
-function withNotice(text: string, notice: string | undefined): string {
+export function withNotice(text: string, notice: string | undefined): string {
   if (notice === undefined) return text;
   const newline = text.indexOf('\n');
   const line = `notice: ${notice}`;
@@ -147,7 +147,7 @@ function describeOne(reply: DelegateReply | CollectReply, view: { agent: string;
 }
 
 /** The row of a listing: queued or running by its status line, anything else by its stored status. */
-function listingStatus(t: TaskListing, now: number): string {
+export function listingStatus(t: TaskListing, now = Date.now()): string {
   return t.status === 'running' ? formatStatusLine(statusFacts(t), now) : t.status;
 }
 

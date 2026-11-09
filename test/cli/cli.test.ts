@@ -45,6 +45,17 @@ describe('Cli', () => {
     expect(existsSync(path.join(root, '.agents', 'subzero'))).toBe(false);
   });
 
+  it('says on stdout that the named agent is not configured when the fallback agent ran instead', async () => {
+    const root = makeProject(DEFAULT_YAML + '  fallback:\n    tools: [read]\n    timeout: 30\n');
+    const { run, out } = cli(root);
+    expect(await run('run', '--agent', 'reviewr', 'x')).toBe(0);
+    const text = out.join('\n');
+    expect(text).toMatch(/^task: sz-[a-z2-7]{6} · fallback · status: completed\nnotice: the agent "reviewr" is not configured, so the fallback agent ran instead; configured agents: /);
+    const { run: run2, out: out2 } = cli(root);
+    expect(await run2('run', '--agent', 'helper', 'x')).toBe(0);
+    expect(out2.join('\n')).not.toMatch(/notice:/);
+  });
+
   it('runs general with no --agent option, and a lone argument is always the brief', async () => {
     const root = makeProject(DEFAULT_YAML + '  general:\n    tools: [read]\n    timeout: 30\n');
     const { run, out } = cli(root);
@@ -85,6 +96,36 @@ describe('Cli', () => {
     out.length = 0;
     expect(await run('tasks')).toBe(0);
     expect(out[0]).toMatch(/^sz-[a-z2-7]{6} {2}helper {2}completed {2}\d{4}-/);
+  });
+
+  it('lists a task with no start time as queued, not launched, and one with a start time as running', async () => {
+    const root = makeProject();
+    const store = new TaskStore(root);
+    const agent = { name: 'helper' } as never;
+    store.createTaskRecord({ taskId: 'sz-queued', agent, brief: 'b', createdAt: new Date().toISOString() });
+    store.createTaskRecord({ taskId: 'sz-runnin', agent, brief: 'b', createdAt: new Date().toISOString() });
+    store.writeStartTime('sz-runnin', new Date().toISOString());
+    const { run, out } = cli(root);
+    expect(await run('tasks')).toBe(0);
+    const queued = out.find((l) => l.startsWith('sz-queued'))!;
+    expect(queued).toMatch(/queued, not launched yet/);
+    expect(queued).not.toMatch(/running, started/);
+    expect(out.find((l) => l.startsWith('sz-runnin'))).toMatch(/running, started /);
+  });
+
+  it('refuses attach on a queued task as not launched yet, and on a started one as running', async () => {
+    const root = makeProject();
+    const store = new TaskStore(root);
+    const agent = { name: 'helper' } as never;
+    store.createTaskRecord({ taskId: 'sz-queued', agent, brief: 'b', createdAt: new Date().toISOString() });
+    store.createTaskRecord({ taskId: 'sz-runnin', agent, brief: 'b', createdAt: new Date().toISOString() });
+    store.writeStartTime('sz-runnin', new Date().toISOString());
+    const { run, err } = cli(root);
+    expect(await run('attach', 'sz-queued')).toBe(1);
+    expect(err.at(-1)).toMatch(/task sz-queued is queued, not launched yet/);
+    expect(err.at(-1)).not.toMatch(/task sz-queued is running/);
+    expect(await run('attach', 'sz-runnin')).toBe(1);
+    expect(err.at(-1)).toMatch(/task sz-runnin is running/);
   });
 
   it('builds the attach command from the launch spec of a settled task', async () => {

@@ -151,6 +151,7 @@ class PiChildRun {
   private client: PiRpcClient | null = null;
   private exit: Promise<{ code: number | null; signal: string | null }> | null = null;
   private exited = false;
+  private exitReported = false;
   private spawnError: Error | null = null;
   private stderrTail = '';
   private textBuffer = '';
@@ -244,6 +245,7 @@ class PiChildRun {
     const mismatch = verifySkills(overlay.map(expectedSkillName), commands.value);
     if (mismatch !== null) {
       await this.killNow();
+      await this.emitRunExited();
       return failed('skill_mismatch', mismatch);
     }
     this.emit({ kind: 'skills_verified', skills: agent.skills.map((s) => s.name) });
@@ -252,6 +254,7 @@ class PiChildRun {
     if (prompt.kind !== 'value') return this.interrupted(prompt.kind);
     if (!prompt.value.success) {
       await this.killNow();
+      await this.emitRunExited();
       return failed('error', bounded(this.withModelHint(`pi refused the prompt: ${prompt.value.error ?? 'no reason given'}`)));
     }
 
@@ -263,6 +266,7 @@ class PiChildRun {
     const stats = await this.ask('get_session_stats');
     this.client!.close();
     await this.waitExitOrKill();
+    await this.emitRunExited();
     return this.settledOutcome(text?.text ?? null, stats);
   }
 
@@ -459,8 +463,7 @@ class PiChildRun {
       client.close();
       await this.waitExitOrKill();
     }
-    const exit = await this.exit!;
-    this.emit({ kind: 'run_exited', code: exit.code, signal: exit.signal });
+    await this.emitRunExited();
     return {
       lastAssistantText: text,
       usage: stats ? usageFromStats(stats) : unavailableUsage('pi did not report usage before it was stopped'),
@@ -481,7 +484,7 @@ class PiChildRun {
     const exit = await this.exit!;
     const tail = this.stderrTail.trim();
     if (tail !== '') this.emit({ kind: 'stderr_tail', text: tail });
-    this.emit({ kind: 'run_exited', code: exit.code, signal: exit.signal });
+    await this.emitRunExited();
     const usage = unavailableUsage('pi exited before it reported usage');
     const session = this.sessionFile !== undefined ? { sessionFile: this.sessionFile } : {};
     if (this.spawnError !== null) {
@@ -498,6 +501,14 @@ class PiChildRun {
     }
     const how = exit.signal !== null ? `signal ${exit.signal}` : `code ${exit.code}`;
     return { ...session, lastAssistantText: null, usage, status: 'failed', failureKind: 'crashed', message: bounded(`pi exited mid-turn with ${how}`) };
+  }
+
+  /** Every path that ends a spawned child reports its exit, once. */
+  private async emitRunExited(): Promise<void> {
+    const exit = await this.exit!;
+    if (this.exitReported) return;
+    this.exitReported = true;
+    this.emit({ kind: 'run_exited', code: exit.code, signal: exit.signal });
   }
 
   private async killNow(): Promise<void> {

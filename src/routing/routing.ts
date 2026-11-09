@@ -178,12 +178,12 @@ function rememberedTier(dataDir: string, sessionId: string, hash: string): strin
 /**
  * Record a denied prompt as its own create-only entry. No entry is read or replaced,
  * so hook processes of one concurrent batch cannot lose each other's entries. Session
- * folders not written for seven days are deleted.
+ * folders not written for seven days are deleted, except the one being written.
  */
 function remember(dataDir: string, sessionId: string, hash: string, tier: string, now: number): void {
   const folder = denyFolder(dataDir, sessionId);
   mkdirSync(folder, { recursive: true, mode: 0o700 });
-  sweepDenyMemory(dataDir, now);
+  sweepDenyMemory(dataDir, now, path.basename(folder));
   try {
     writeFileSync(path.join(folder, hash), JSON.stringify({ tier }) + '\n', { flag: 'wx', mode: 0o600 });
   } catch (err) {
@@ -191,10 +191,12 @@ function remember(dataDir: string, sessionId: string, hash: string, tier: string
   }
 }
 
-function sweepDenyMemory(dataDir: string, now: number): void {
+function sweepDenyMemory(dataDir: string, now: number, keep: string): void {
   const root = denyRoot(dataDir);
   try {
     for (const name of readdirSync(root)) {
+      // A resumed session's folder can be old by mtime; the write below must not lose it.
+      if (name === keep) continue;
       try {
         const folder = path.join(root, name);
         if (now - statSync(folder).mtimeMs > DENY_MEMORY_TTL_MS) rmSync(folder, { recursive: true, force: true });

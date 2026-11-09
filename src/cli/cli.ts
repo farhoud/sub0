@@ -25,7 +25,7 @@ import {
   type ThinkingLevel,
 } from '../config/agent-config.js';
 import { isTaskId } from '../core/ids.js';
-import { formatResult } from '../mcp/format.js';
+import { formatResult, formatStatusLine, listingStatus, statusFacts, withNotice } from '../mcp/format.js';
 import { describeEvent } from '../mcp/progress.js';
 import { UnsupportedHostError } from '../kernel/kernel.js';
 import { DelegationService, EmptyBriefError, type DelegationServiceOptions } from '../service/delegation-service.js';
@@ -181,7 +181,7 @@ async function run(service: DelegationService, args: string[], io: CliIo): Promi
       },
     );
     if (reply.kind !== 'result') return 1;
-    io.out(formatResult(reply.result));
+    io.out(withNotice(formatResult(reply.result), reply.notice));
     return reply.result.status === 'completed' || reply.result.status === 'truncated' ? 0 : 1;
   } finally {
     process.off('SIGINT', onSigint);
@@ -192,7 +192,7 @@ async function tasks(service: DelegationService, io: CliIo): Promise<number> {
   const views = await service.list();
   views.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   if (views.length === 0) io.out('no tasks');
-  for (const v of views) io.out(`${v.taskId}  ${v.agent}  ${v.status}  ${v.createdAt}`);
+  for (const v of views) io.out(`${v.taskId}  ${v.agent}  ${listingStatus(v)}  ${v.createdAt}`);
   return 0;
 }
 
@@ -220,7 +220,13 @@ async function attach(
     return 1;
   }
   if (record.status === 'running') {
-    io.err(`subzero: task ${id} is running; attach once its child run has ended`);
+    // A stored running status with no start time is a queued task: no child exists yet.
+    const facts = statusFacts(record);
+    io.err(
+      facts.state === 'queued'
+        ? `subzero: task ${id} is ${formatStatusLine(facts)}; attach once its child run has ended`
+        : `subzero: task ${id} is running; attach once its child run has ended`,
+    );
     return 1;
   }
   const spec = record.task?.launchSpec;
