@@ -27,7 +27,7 @@ do, what it deferred, and how it was checked.
 | Sigil contract (11 components) | Every component has implementing code. `sigilc tree --root .` reports no diagnostics. |
 | Claude Code parent, pi child | Built and checked live with Claude Code 2.1.318 and pi 0.87. |
 | Tiered subagent routing for compound-engineering | Built and accepted in the R17 live run and its probes. |
-| Plugin distribution (`subzero@qoherent`) | Built and tested locally. A script builds a `plugin` branch that Claude Code adds straight from git; it has not been pushed yet. The release workflow, the transfer, the first tag and the walkthroughs are still to do. |
+| Plugin distribution (`subzero@qoherent`) | Built and tested locally. The repository is at `qoherent/sub0`, and the `plugin` branch is published and installs from GitHub on a clean profile. The release workflow, the first tag and the model-backed walkthroughs are still to do. |
 | Spike experiment (A/B on sigil-evaluate) | Partly run. Planned passes are missing and no go/no-go decision has been written. |
 | v0.2 and later (task model, config layering, other hosts) | Not started. |
 
@@ -84,9 +84,9 @@ The distribution work added:
 - Stage 1 walkthrough: install from `dist-release/local-marketplace` on a clean
   profile and run `init`, `tasks` and a routed task. It needs a logged-in
   profile and a reachable model endpoint.
-- The repository transfer to `qoherent/sub0` and every step of the
-  [after-the-transfer checklist](releasing.md). That includes the scan of
-  tracked files and history before anything is made public.
+- The rest of the [after-the-transfer checklist](releasing.md): Actions write
+  permission, tag and branch protection, and the first tag. The transfer and the
+  scan are done; see [distribution-results.md](distribution-results.md).
 - The first tag. The release workflow has never run, so its push of
   `.claude-plugin/marketplace.json` to the default branch is untested.
 - Stage 2 walkthrough: a newcomer follows the README alone, then updates from
@@ -109,9 +109,8 @@ The distribution work added:
   as `node <plugin folder>/dist/cli.js show <task id>` (or `attach`), with the
   folder taken from `claude plugin list --json`, and gives plain `pi` commands
   for reading a child session.
-- The install commands in the README name `qoherent/sub0@plugin`. The repository
-  has no marketplace file on `main`, so they work only once the `plugin` branch is
-  published with `npm run release:branch -- --push`. When a release is cut, the
+- The install commands in the README name `qoherent/sub0@plugin`, which is published. The repository
+  has no marketplace file on `main`. When a release is cut, the
   catalog moves to `main` and users who installed from the branch must remove the
   `qoherent` marketplace before they add the release one.
 
