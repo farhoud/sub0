@@ -12,6 +12,10 @@ import { DelegationService } from '../service/delegation-service.js';
 import { dataDir, readParentSessionId, removeReadinessMarker, setting, writeReadinessMarker } from './parent-session.js';
 import { createSubzeroServer } from './server.js';
 
+// Stamped by build.mjs from package.json; absent when this file runs unbundled.
+declare const __SUBZERO_VERSION__: string | undefined;
+const version = typeof __SUBZERO_VERSION__ === 'string' ? __SUBZERO_VERSION__ : undefined;
+
 const env = { ...process.env };
 if (setting(env.SUBZERO_PROJECT_DIR) === undefined) delete env.SUBZERO_PROJECT_DIR;
 
@@ -58,6 +62,7 @@ process.on('exit', () => {
 
 server = createSubzeroServer({
   service,
+  version,
   parentSessionId: () => {
     markReady(); // a root that resolved later, through a reported root, is marked on the next call
     return readParentSessionId(data, service.projectRoot, process.ppid);

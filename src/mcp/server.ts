@@ -105,7 +105,7 @@ function stringArg(args: Record<string, unknown>, key: string): string | undefin
 export function createSubzeroServer(options: SubzeroServerOptions): Server {
   const { service } = options;
   const server = new Server(
-    { name: 'subzero', version: options.version ?? '0.0.1-spike' },
+    { name: 'subzero', version: options.version ?? '0.0.0-dev' },
     { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
   );
 

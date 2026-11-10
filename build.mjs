@@ -1,5 +1,9 @@
 // Bundles each entry into one file under dist/, so the plugin runs with no install step.
+// The version in package.json is stamped into each bundle as __SUBZERO_VERSION__.
+import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
+
+const { version } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 
 const entries = {
   server: 'src/mcp/main.ts',
@@ -16,6 +20,7 @@ for (const [name, entry] of Object.entries(entries)) {
     platform: 'node',
     target: 'node22',
     format: 'esm',
+    define: { __SUBZERO_VERSION__: JSON.stringify(version) },
     banner: {
       js: [
         name === 'cli' ? '#!/usr/bin/env node' : '',

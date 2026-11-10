@@ -60,7 +60,7 @@ real run and is filled in when it happens.
 
 | Req | What it requires | Evidence | Status |
 | --- | --- | --- | --- |
-| R1 | One bounded result per call, task id first, summary within 2000 tokens | `test/core/task-core.test.ts`, `test/core/result.test.ts`, `test/mcp/server.test.ts` | tests pass; live: pending |
+| R1 | One result per call, task id first. The plan's 2000-token summary limit was replaced by decision 24: the summary is the child's whole final message, never cut, and the brief gives a 48,000-character reply budget | `test/core/task-core.test.ts`, `test/mcp/server.test.ts` | tests pass; live: whole results in the six-batch probe after decision 24 (below) |
 | R2 | Exactly the declared skills; a missing folder or a difference fails as `skill_mismatch` before the brief | `test/pi/driver.test.ts` (skill verification cases); live pi 0.87 `get_commands` check | tests pass; live verification passed on a smoke agent |
 | R3 | Declared model and thinking level, user's pi login, no extensions, context files, templates or other skills | `test/pi/launch.test.ts`; launch spec in each task record; the table's thinking column | tests pass; live: pending |
 | R4 | Typed failures, cancel with no failure kind, no pi process outlives Esc, timeout or session end | `test/pi/driver.test.ts`, `test/mcp/server.test.ts` (stdin close), `test/service/delegation-service.test.ts` (shutdown) | tests pass; live orphan check: pending |

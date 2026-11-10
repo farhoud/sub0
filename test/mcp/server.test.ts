@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -439,6 +439,24 @@ function makeProjectYamlWithoutGeneral(): string {
 describe('McpServer process', () => {
   beforeAll(() => {
     execFileSync(process.execPath, ['build.mjs'], { cwd: REPO });
+  });
+
+  it('reports the plugin version from package.json in its server info', async () => {
+    const { version } = JSON.parse(readFileSync(path.join(REPO, 'package.json'), 'utf8')) as { version: string };
+    const server = spawn(process.execPath, [path.join(REPO, 'dist', 'server.js')], {
+      cwd: tempDir(),
+      env: { ...process.env, SUBZERO_PROJECT_DIR: makeProject(), SUBZERO_DATA: tempDir() },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let out = '';
+    server.stdout.on('data', (chunk: Buffer) => (out += chunk.toString()));
+    server.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) + '\n');
+    await until(() => out.includes('\n'), 10_000);
+    const exited = new Promise((r) => server.once('exit', r));
+    server.stdin.end();
+    await exited;
+    const reply = JSON.parse(out.split('\n')[0]!) as { result: { serverInfo: { name: string; version: string } } };
+    expect(reply.result.serverInfo).toEqual({ name: 'subzero', version });
   });
 
   it('leaves no process of a live child run behind when its stdin closes', async () => {
