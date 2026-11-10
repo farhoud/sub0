@@ -409,7 +409,7 @@ describe('hooks.json and the server readiness marker', () => {
     };
     const entry = hooks.hooks.PreToolUse[0]!;
     expect(entry.matcher).toBe('Agent|Task');
-    expect(entry.hooks[0]!.command).toContain('dist/agent-hook.js');
+    expect(entry.hooks[0]!.command).toContain('bin/subzero\" --bundle agent-hook');
     expect(existsSync(HOOK)).toBe(true);
   });
 

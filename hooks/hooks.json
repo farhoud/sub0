@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/hook.js\""
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/subzero\" --bundle hook"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent-hook.js\""
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/subzero\" --bundle agent-hook"
           }
         ]
       }
