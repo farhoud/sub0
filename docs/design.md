@@ -566,7 +566,7 @@ so and changes nothing. If the parent cannot hold a long call open (Codex `tool_
 
 | Parent | Packaging | Mechanism |
 |---|---|---|
-| Claude Code | Plugin (`.claude-plugin/plugin.json`) bundling `.mcp.json` (`node ${CLAUDE_PLUGIN_ROOT}/dist/server.js`), SessionStart/SessionEnd hooks, one static usage skill. Proxies are generated into the project's `.claude/skills/`. | MCP stdio; `delegate` and `await` always loaded, other tools deferred via tool search; progress every ≤30s; auto-background after 120s. Detail: [target-claude-pi.md](target-claude-pi.md) |
+| Claude Code | Plugin (`.claude-plugin/plugin.json`) bundling `.mcp.json` (`node ${CLAUDE_PLUGIN_ROOT}/dist/server.js`), a SessionStart hook and a PreToolUse hook on `Agent|Task` (§5.4), one static usage skill. Proxies are generated into the project's `.claude/skills/`. | MCP stdio; `delegate` and `await` always loaded, other tools deferred via tool search; progress every ≤30s; auto-background after 120s. Detail: [target-claude-pi.md](target-claude-pi.md) |
 | Codex | Codex plugin (skill + MCP server + hooks), or just `[mcp_servers.subzero]` with `tool_timeout_sec` raised | MCP stdio; proxy skills in `.agents/skills` |
 | pi | Native TS extension that imports the core library directly (`pi.registerTool`), no MCP needed | In-process. Can use `ctx.ui` for progress and permission questions. |
 
@@ -574,6 +574,43 @@ Each adapter is a **parent adapter** that its process's entry point registers wi
 the core only through the Delegation service (delegate, collect, cancel and list) and through the agent configuration for what it
 shows or decides, and through the Kernel only to list the supported hosts it passes to the agent configuration, and it is never given a child driver. The Kernel keeps the names only to refuse a second
 adapter with the same name; a use for the list beyond that waits for a second parent.
+
+### 5.4 Claude Code routing in practice
+
+The routing of §5.2 for Claude Code, as built and checked live with Claude Code 2.1.318 (the R17 run and
+its probes, [spike-results.md](spike-results.md)). The contract is `design/routing-hooks.sigil`.
+
+- **Session start.** The SessionStart hook records the session id and prints the routing text, built
+  from the current agent file: each compound-engineering tier word (`small`, `medium`, `large`) whose tier
+  is configured goes to `delegate` with that tier; the others stay on the Agent tool. The text also gives
+  the batch pattern (`delegate` with `wait: false` in one message, then `await` up to 600 seconds), says a
+  queued task has not launched, keeps fork and worktree spawns on the Agent tool, and explains the
+  pass-back. No routable tier word means no text; an agent file that fails to load gives a one-line warning.
+- **The redirect hook.** A PreToolUse hook on `Agent|Task` denies a generic spawn (no agent type,
+  `general-purpose` or `claude`) whose model alias maps to a configured tier (`haiku` → small, `sonnet` →
+  medium, none → large; `opus` and `fable` never map) and tells Claude to call `delegate` instead. Fork
+  spawns (`subagent_type: "fork"`) and any spawn with `isolation` set always pass.
+- **Failing open.** The hook denies only while a readiness marker names a live MCP server whose parent
+  process is one of the hook's own ancestors, and only when the agent file loads and `routing.hook` is not
+  false. Any error allows the spawn. When the server fails to start the session-start text still says
+  routing is on, but nothing is denied.
+- **Deny memory.** Each denied prompt is kept per session as a create-only entry named by the prompt's
+  hash, with the tier it was denied toward, so a retry with another model alias is denied too. Each new
+  entry deletes other sessions' folders older than seven days, never the writing session's own.
+- **Pass-back.** When `delegate` is refused or returns a tool error with no task, Claude re-spawns the same
+  prompt with a description that begins with `passback`; the hook allows it only for a prompt it denied.
+- **One project root.** The hooks take the project root only from `CLAUDE_PROJECT_DIR`, the same source
+  as the server's `SUBZERO_PROJECT_DIR`, never from the hook input's `cwd`.
+- **Session id per session.** The SessionStart hook writes one entry per session id with its ancestor
+  processes, and the server takes the newest entry whose ancestors include its own parent process, so two
+  Claude sessions in one project never mix their listings.
+- **Status and results.** A task waiting for endpoint capacity is reported as queued, not launched yet,
+  with its endpoint, place and wait; a running one shows its start time. That wording belongs to the
+  Delegation service and is shared by the MCP server and the CLI. Results are never cut (decision 24):
+  `await` gives each result whole while the reply fits Claude Code's 50,000-character inline limit and
+  lists the rest for `tasks(<id>)`, and each brief tells the child to keep its reply under 48,000 characters.
+- **Open limits.** The hook does not read the session's `permission_mode`, so a generic spawn in plan mode
+  is still redirected to a child with write and shell tools.
 
 ## 6. Child runtime
 

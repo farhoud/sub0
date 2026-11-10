@@ -141,9 +141,10 @@ component RoutingHooks {
     the shared checkout and sees only its brief text. A fork is a spawn whose
     agent type is fork, and any isolation value that is not empty counts, such as
     worktree or remote, including a value this design does not know, because
-    subzero can honor no isolated spawn. These are the shapes that Claude Code's
-    Agent tool shows today and are an assumption that the acceptance run checks
-    against a real hook input.
+    subzero can honor no isolated spawn. These are the shapes of a real hook
+    input that Claude Code 2.1.318 gave on 2026-11-10: an Agent tool input
+    with a description, a prompt, an optional model, run in background, and
+    isolation worktree or agent type fork when asked.
 
     A pass-back whose prompt the deny memory of its parent session id holds must
     always be allowed, before the deny memory can deny it, so that a subagent whose
@@ -291,5 +292,13 @@ component RoutingHooks {
     The general agent runs with write and shell tools inside pi, outside
     Claude Code's permission prompts, which the user accepted so that
     compound-engineering reviewers keep full fidelity.
+
+    Two limits are known and left open. The hook input carries the permission
+    mode of the session, which the hook does not read, so a generic spawn made
+    in plan mode is still sent to a child with write and shell tools. The
+    SessionStart hook runs before the server connects, so when the server then
+    fails to start the routing text still says that routing is on; nothing is
+    denied, because no readiness marker exists, and Claude keeps its own Agent
+    tool.
   }
 }
