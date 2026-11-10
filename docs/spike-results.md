@@ -75,7 +75,7 @@ real run and is filled in when it happens.
 
 Plan: [docs/plans/2026-11-06-0953-feat-tiered-subagent-routing-plan.md](plans/2026-11-06-0953-feat-tiered-subagent-routing-plan.md), unit U6. Run on 2026-11-10 from a copy made by `examples/demo/demo.sh setup` (git repo: an empty baseline commit, then `src/`), headless with `claude -p "/ce-code-review base:c00afd7 depth:full"`, Claude Code 2.1.318 (model claude-opus-5-5), the subzero plugin at commit 90b8f24 and compound-engineering 3.26.3. The review ran 53 turns in 13.7 minutes. Its transcript is the stream-json file `r17/transcript.jsonl` in the session scratchpad, not kept in the repository.
 
-**Deviation from the plan.** The `r9700` endpoint was down, so the tiers (`default` and `medium`, thinking low and medium) ran on a llama.cpp server at `http://192.168.0.12:8080/v1` through a second pi provider, `local`, serving `qwen3.6-35b-a3b-reggie`, with the endpoint named `local` (`parallel: 1`). The task records therefore show `local/qwen3.6-35b-a3b-reggie`, not `r9700/Qwen3.8`. The demo files in the repository still name `r9700`; only the demo copy was edited.
+**Deviation from the plan.** The `r9700` endpoint was down, so the tiers (`default` and `medium`, thinking low and medium) ran on a llama.cpp server at `http://<lan-address>:8080/v1` through a second pi provider, `local`, serving `qwen3.6-35b-a3b-reggie`, with the endpoint named `local` (`parallel: 1`). The task records therefore show `local/qwen3.6-35b-a3b-reggie`, not `r9700/Qwen3.8`. The demo files in the repository still name `r9700`; only the demo copy was edited.
 
 | Success criterion | Result | Evidence |
 |---|---|---|

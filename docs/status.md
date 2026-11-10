@@ -71,7 +71,7 @@ The distribution work added:
 - the release zip and local marketplace build (`npm run release:build`);
 - `npm run release:branch`, which builds the `plugin` branch (the built plugin plus its
   marketplace file) that users add with `claude plugin marketplace add
-  farhoud/subzero@plugin`, and pushes it only with `--push`;
+  qoherent/sub0@plugin`, and pushes it only with `--push`;
 - the marketplace generator and the tag-triggered release workflow;
 - the [README](../README.md), the [configuration reference](configuration.md)
   and [releasing.md](releasing.md).
@@ -109,12 +109,11 @@ The distribution work added:
   as `node <plugin folder>/dist/cli.js show <task id>` (or `attach`), with the
   folder taken from `claude plugin list --json`, and gives plain `pi` commands
   for reading a child session.
-- The install commands in the README name `farhoud/subzero@plugin`, because
-  `qoherent/sub0` does not exist yet and the repository has no marketplace
-  file on `main`. The `plugin` branch must be published with
-  `npm run release:branch -- --push` before the commands work. Users who
-  install from it must remove the `qoherent` marketplace before they add the
-  release one.
+- The install commands in the README name `qoherent/sub0@plugin`. The repository
+  has no marketplace file on `main`, so they work only once the `plugin` branch is
+  published with `npm run release:branch -- --push`. When a release is cut, the
+  catalog moves to `main` and users who installed from the branch must remove the
+  `qoherent` marketplace before they add the release one.
 
 **Spike experiment (spike plan U8)**
 - Not all planned passes were run. The plan asked for three passes each of A and

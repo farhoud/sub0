@@ -58,12 +58,12 @@ this repository, which holds the built plugin. Claude Code adds it as a
 marketplace named `qoherent` straight from git. In your shell:
 
 ```sh
-claude plugin marketplace add farhoud/subzero@plugin
+claude plugin marketplace add qoherent/sub0@plugin
 claude plugin install subzero@qoherent
 ```
 
 In a Claude Code session the same two steps are `/plugin marketplace add
-farhoud/subzero@plugin` and `/plugin install subzero@qoherent`; the install command
+qoherent/sub0@plugin` and `/plugin install subzero@qoherent`; the install command
 opens the plugin's details, where you choose a scope. Run `/reload-plugins` or
 start a new session. There is nothing to clone or build. Typing `/subzero:` should
 now list `init` and `tasks`.
