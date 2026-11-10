@@ -71,6 +71,28 @@ real run and is filled in when it happens.
 | R9 | In B every interpreter goes through `delegate` and none through the Agent tool; the main conversation loads no sigil skill | Table: interpreter runs via subzero / Agent tool, main conversation clean | pending (U8) |
 | R10 | Each interpreter writes its claim rows to the exact answer file its brief names | Table: stray writes; the ingest state | pending (U8) |
 
+## Tiered subagent routing: acceptance run (R17)
+
+Plan: [docs/plans/2026-11-06-0953-feat-tiered-subagent-routing-plan.md](plans/2026-11-06-0953-feat-tiered-subagent-routing-plan.md), unit U6. Run on 2026-11-10 from a copy made by `examples/demo/demo.sh setup` (git repo: an empty baseline commit, then `src/`), headless with `claude -p "/ce-code-review base:c00afd7 depth:full"`, Claude Code 2.1.318 (model claude-opus-5-5), the subzero plugin at commit 90b8f24 and compound-engineering 3.26.3. The review ran 53 turns in 13.7 minutes. Its transcript is the stream-json file `r17/transcript.jsonl` in the session scratchpad, not kept in the repository.
+
+**Deviation from the plan.** The `r9700` endpoint was down, so the tiers (`default` and `medium`, thinking low and medium) ran on a llama.cpp server at `http://192.168.0.12:8080/v1` through a second pi provider, `local`, serving `qwen3.6-35b-a3b-reggie`, with the endpoint named `local` (`parallel: 1`). The task records therefore show `local/qwen3.6-35b-a3b-reggie`, not `r9700/Qwen3.8`. The demo files in the repository still name `r9700`; only the demo copy was edited.
+
+| Success criterion | Result | Evidence |
+|---|---|---|
+| Every CE dispatch for a configured tier appears as a subzero task with that tier's model | Met, for one dispatch | CE selected one mid-tier reviewer, `testing`. `delegate` was called with `tier: "medium"` and `wait: false`, then `await` with `timeout_s: 600`. Task `sz-iziigu` records agent `general:medium` and a launch with `--model local/qwen3.6-35b-a3b-reggie --thinking medium --tools read,bash,edit,write,grep,find,ls`. Its `startedAt` is set, and its `parentSessionId` is the session's id from the per-session file. |
+| Every CE dispatch for an unconfigured tier ran natively | Met | `correctness`, `security` and `adversarial` (session tier) went to the Agent tool, as did the merge leaf, the validator and the report leaf. No `large` or `small` tier is configured, and the hook denied none of them. |
+| No Agent call was allowed with a prompt the hook had denied earlier, except a pass-back | Met, vacuously | The hook denied no spawn in the review, because Claude followed the SessionStart text and called `delegate` itself. There were no pass-backs. |
+| CE's final report lists no failed reviewer and has findings from every selected reviewer | Met | Reviewers: correctness, security, testing, adversarial. The report lists 13 primary findings; the validator confirmed 8 of 8 in its batch and the testing reviewer's findings are among them. Coverage lists no failed reviewer. |
+
+**Probe of the PreToolUse hook.** Because the review never needed a denial, a second headless run asked Claude for one generic Agent spawn with `model: "sonnet"` and the description `probe hook`. The hook denied it with the instruction to call `delegate` with `tier: "medium"`, the prompt unchanged as `brief` and `wait: false`; Claude did so, and task `sz-wksvtm` (`general:medium`) completed in 6 seconds with the reply `ok`. This confirms in Claude Code 2.1.318 that the hook fires on the Agent tool, that the readiness marker and the ancestor-process check work in a real process tree, and that a denial reaches Claude as a routing instruction. The hook input's `description` field (the pass-back marker) was not exercised, because no pass-back was needed.
+
+**Not covered by this run**
+- AE4 (queued tasks): only one reviewer was routed, so no task waited for the endpoint. The queued and started wording is covered by the unit tests, not by CE.
+- AE12 (pass-back), AE8 (alias switch after a deny) and the `fork` and `isolation` field names were not run live.
+- The three further scenarios the plan lists were not run: `/compact` mid-review, the subzero server command broken, and a tier whose host has no driver.
+- CE tried to start its cross-model peer review (a Codex command). The non-interactive session had no permission to run it, so it was denied, nothing was sent, and the adversarial lens ran in-process.
+- CE chose four reviewers for a 75-line diff, so the run shows routing for one mid-tier reviewer, not a six-reviewer batch.
+
 ## Decision
 
 _Written by the user, citing the table above: build subzero v0.1 or not, and why._
