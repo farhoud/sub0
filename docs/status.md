@@ -27,11 +27,11 @@ do, what it deferred, and how it was checked.
 | Sigil contract (11 components) | Every component has implementing code. `sigilc tree --root .` reports no diagnostics. |
 | Claude Code parent, pi child | Built and checked live with Claude Code 2.1.318 and pi 0.87. |
 | Tiered subagent routing for compound-engineering | Built and accepted in the R17 live run and its probes. |
-| Plugin distribution (`subzero@qoherent`) | Built and tested locally. Not yet released: the repository transfer, the first tag and the walkthroughs are still to do. |
+| Plugin distribution (`subzero@qoherent`) | Built and tested locally. A script builds a `plugin` branch that Claude Code adds straight from git; it has not been pushed yet. The release workflow, the transfer, the first tag and the walkthroughs are still to do. |
 | Spike experiment (A/B on sigil-evaluate) | Partly run. Planned passes are missing and no go/no-go decision has been written. |
 | v0.2 and later (task model, config layering, other hosts) | Not started. |
 
-Tests: 24 files, 395 tests pass (`npm test`), with typecheck and build clean.
+Tests: 25 files, 414 tests pass (`npm test`), with typecheck and build clean.
 
 ## What is implemented
 
@@ -69,6 +69,9 @@ The distribution work added:
 - the `bin/subzero` launcher, which checks for Node 22;
 - the `/subzero:init` and `/subzero:tasks` commands;
 - the release zip and local marketplace build (`npm run release:build`);
+- `npm run release:branch`, which builds the `plugin` branch (the built plugin plus its
+  marketplace file) that users add with `claude plugin marketplace add
+  farhoud/subzero@plugin`, and pushes it only with `--push`;
 - the marketplace generator and the tag-triggered release workflow;
 - the [README](../README.md), the [configuration reference](configuration.md)
   and [releasing.md](releasing.md).
@@ -103,9 +106,15 @@ The distribution work added:
   puts no `subzero` command on the user's PATH, and the distribution plan
   deferred slash commands for both (`attach` follows a live child and suits a
   terminal; `show` opens an exported page). For now the README says to run them
-  as `node <checkout>/dist/cli.js show <task id>` (or `attach`) from a built
-  checkout of this repository, and gives plain `pi` commands for reading a child
-  session.
+  as `node <plugin folder>/dist/cli.js show <task id>` (or `attach`), with the
+  folder taken from `claude plugin list --json`, and gives plain `pi` commands
+  for reading a child session.
+- The install commands in the README name `farhoud/subzero@plugin`, because
+  `qoherent/sub0` does not exist yet and the repository has no marketplace
+  file on `main`. The `plugin` branch must be published with
+  `npm run release:branch -- --push` before the commands work. Users who
+  install from it must remove the `qoherent` marketplace before they add the
+  release one.
 
 **Spike experiment (spike plan U8)**
 - Not all planned passes were run. The plan asked for three passes each of A and

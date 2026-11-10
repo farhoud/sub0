@@ -53,17 +53,24 @@ saying what to install.
 
 ## Install
 
-In Claude Code, add the marketplace and install the plugin:
+There is no published release yet, so the plugin comes from the `plugin` branch of
+this repository, which holds the built plugin. Claude Code adds it as a
+marketplace named `qoherent` straight from git. In your shell:
 
-```text
-/plugin marketplace add qoherent/sub0
-/plugin install subzero@qoherent
+```sh
+claude plugin marketplace add farhoud/subzero@plugin
+claude plugin install subzero@qoherent
 ```
 
-The install command opens the plugin's details. Choose a scope, and run
-`/reload-plugins` if Claude Code asks for it. The plugin is downloaded as a built
-release; there is nothing to build or install in your project. Typing `/subzero:`
-should now list `init` and `tasks`.
+In a Claude Code session the same two steps are `/plugin marketplace add
+farhoud/subzero@plugin` and `/plugin install subzero@qoherent`; the install command
+opens the plugin's details, where you choose a scope. Run `/reload-plugins` or
+start a new session. There is nothing to clone or build. Typing `/subzero:` should
+now list `init` and `tasks`.
+
+When releases are published, the install command will change to the `qoherent`
+marketplace of the organization. Remove this one first, because both use the name
+`qoherent`: `claude plugin marketplace remove qoherent`.
 
 ## Set up a model
 
@@ -276,13 +283,15 @@ things:
 The subzero command line does the same jobs with the child's own launch flags:
 `subzero show <task id>` exports the page, and `subzero attach <task id>` opens
 the child in pi and refuses while it is running. In this preview neither is a
-slash command; with a built checkout of this repository, run
-`node <checkout>/dist/cli.js show <task id>` (or `attach`) in the project folder.
+slash command; run `node <plugin folder>/dist/cli.js show <task id>` (or
+`attach`) in the project folder. `claude plugin list --json` shows the plugin
+folder as `installPath`.
 
 ## Update
 
-A release reaches you only when you update. Changes on the main branch never do.
-Refresh the marketplace, then update the plugin, in a session:
+A new version reaches you only when the `plugin` branch gets a new version
+number. A change that keeps the same number does not. Refresh the marketplace,
+then update the plugin, in a session:
 
 ```text
 /plugin marketplace update qoherent
