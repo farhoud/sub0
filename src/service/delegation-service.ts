@@ -29,6 +29,11 @@ export interface Delegation {
   briefText: string;
   files?: string[];
   expectedOutput?: string;
+  /**
+   * The size, in characters, the child's final reply should stay under, which the
+   * front end knows from how it returns a result; none tells the child no size.
+   */
+  replyBudgetChars?: number;
   parentSessionId?: string;
 }
 
@@ -98,13 +103,17 @@ interface Connected {
   core: TaskCore;
 }
 
-/** Render the files and the expected output after the brief text, into one brief. */
-export function renderBrief(delegation: Pick<Delegation, 'briefText' | 'files' | 'expectedOutput'>): string {
+/** Render the files, the expected output and the reply size after the brief text, into one brief. */
+export function renderBrief(delegation: Pick<Delegation, 'briefText' | 'files' | 'expectedOutput' | 'replyBudgetChars'>): string {
   let brief = delegation.briefText;
   const files = (delegation.files ?? []).filter((f) => f !== '');
   if (files.length > 0) brief += `\n\n## Files\n\n${files.map((f) => `- ${f}`).join('\n')}`;
   if (delegation.expectedOutput !== undefined && delegation.expectedOutput.trim() !== '') {
     brief += `\n\n## Expected output\n\n${delegation.expectedOutput}`;
+  }
+  if (delegation.replyBudgetChars !== undefined) {
+    const size = delegation.replyBudgetChars.toLocaleString('en-US');
+    brief += `\n\n## Reply size\n\nKeep your final reply under ${size} characters. It is returned to the parent whole, never cut.`;
   }
   return brief;
 }

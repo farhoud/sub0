@@ -8,7 +8,7 @@ import { LoadError, routableTiers, TierError, UnknownAgentError, UnresolvedRootE
 import { isTaskId } from '../core/ids.js';
 import { UnsupportedHostError } from '../kernel/kernel.js';
 import { EmptyBriefError, type DelegationService } from '../service/delegation-service.js';
-import { bound, describeReply, describeShare, formatListing, sectionShare } from './format.js';
+import { describeReply, formatAwait, formatListing, REPLY_BUDGET_CHARS } from './format.js';
 import { ProgressReporter, type ProgressOptions } from './progress.js';
 
 export const SERVER_INSTRUCTIONS = [
@@ -75,8 +75,9 @@ export interface SubzeroServerOptions {
   version?: string;
 }
 
+/** A tool reply, never cut: Claude Code saves a reply over its inline limit to a file. */
 function text(body: string, isError = false): CallToolResult {
-  return { content: [{ type: 'text', text: bound(body) }], ...(isError ? { isError: true } : {}) };
+  return { content: [{ type: 'text', text: body }], ...(isError ? { isError: true } : {}) };
 }
 
 /** What a caller does when delegate made no task because the tier or its host cannot run. */
@@ -164,6 +165,8 @@ export function createSubzeroServer(options: SubzeroServerOptions): Server {
                 briefText: brief,
                 ...(files !== undefined ? { files } : {}),
                 ...(expectedOutput !== undefined ? { expectedOutput } : {}),
+                // The child's result comes back whole; this keeps it within Claude Code's inline limit.
+                replyBudgetChars: REPLY_BUDGET_CHARS,
                 ...(parentSessionId !== undefined ? { parentSessionId } : {}),
               },
               {
@@ -199,9 +202,8 @@ export function createSubzeroServer(options: SubzeroServerOptions): Server {
           if (ids.length === 0) return text('await needs at least one task id', true);
           const seconds = typeof args.timeout_s === 'number' && args.timeout_s >= 0 ? Math.min(args.timeout_s, MAX_AWAIT_SECONDS) : 30;
           const replies = await Promise.all(ids.map((id) => service.waitFor(id, seconds * 1000)));
-          // Each task gets an equal share of the result limit, so one long result never hides the others.
-          const share = sectionShare(replies.length);
-          return text(replies.map((r) => describeShare(r, share)).join('\n\n'));
+          // Whole results while they fit, the first always; a later one that does not fit is deferred, never cut.
+          return text(formatAwait(replies));
         }
 
         case 'cancel': {

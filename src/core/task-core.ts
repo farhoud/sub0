@@ -7,7 +7,6 @@
 import type { AgentDefinition } from '../config/agent-config.js';
 import type { TaskRecordWriter } from '../store/task-store.js';
 import { newTaskId } from './ids.js';
-import { cutSummary } from './result.js';
 import {
   ENDED_STATES,
   type ChildOutcome,
@@ -164,7 +163,8 @@ export class Task {
       taskId: this.taskId,
       agent: this.agent.name,
       status: outcome.status,
-      summary: cutSummary(outcome.lastAssistantText ?? '', this.taskId),
+      // The summary is the child's whole last assistant message, never cut.
+      summary: outcome.lastAssistantText ?? '',
       usage: outcome.usage,
     };
     if (outcome.status === 'failed') {

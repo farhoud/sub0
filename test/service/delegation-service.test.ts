@@ -68,6 +68,17 @@ describe('DelegationService', () => {
     expect(renderBrief({ briefText: 'Do X.' })).toBe('Do X.');
   });
 
+  it('renders the reply size after the files and the expected output only when a reply budget is given', () => {
+    expect(renderBrief({ briefText: 'Do X.', files: ['a.ts'], expectedOutput: 'A list.', replyBudgetChars: 48_000 })).toBe(
+      'Do X.\n\n## Files\n\n- a.ts\n\n## Expected output\n\nA list.\n\n' +
+        '## Reply size\n\nKeep your final reply under 48,000 characters. It is returned to the parent whole, never cut.',
+    );
+    expect(renderBrief({ briefText: 'Do X.', replyBudgetChars: 1000 })).toBe(
+      'Do X.\n\n## Reply size\n\nKeep your final reply under 1,000 characters. It is returned to the parent whole, never cut.',
+    );
+    expect(renderBrief({ briefText: 'Do X.', files: ['a.ts'] })).not.toMatch(/Reply size/);
+  });
+
   it('keeps the second of two runs on a limit-1 endpoint Pending until the first ends, in each way', async () => {
     for (const end of ['settle', 'fail', 'cancel'] as const) {
       const { port, started } = manualPort();

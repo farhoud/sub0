@@ -72,7 +72,7 @@ export type DomainEvent =
 
 export type DomainEventKind = DomainEvent['kind'];
 
-/** The one bounded answer a task returns. The task id always comes first. */
+/** The one answer a task returns. The task id always comes first. */
 export interface Result {
   taskId: string;
   agent: string;

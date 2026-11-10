@@ -14,6 +14,7 @@ import { liveReadinessMarkers } from '../mcp/parent-session.js';
 /** The delegate tool as Claude Code names it for the plugin. */
 export const DELEGATE_TOOL = 'mcp__plugin_subzero_subzero__delegate';
 const AWAIT_TOOL = 'mcp__plugin_subzero_subzero__await';
+const TASKS_TOOL = 'mcp__plugin_subzero_subzero__tasks';
 /** The longest wait the await tool honours. */
 const AWAIT_SECONDS = 600;
 /** The description prefix that marks a pass-back (KTD17). */
@@ -80,7 +81,7 @@ export function buildRoutingText(tiers: RoutableTier[]): string {
   }
   lines.push(
     'Pass the subagent prompt unchanged as brief. A subagent spawn that asks for a fork or for worktree isolation stays on the Agent tool and is never sent to subzero.',
-    `Dispatch every routed subagent with ${DELEGATE_TOOL}(tier, brief, wait: false) in one message. Then call ${AWAIT_TOOL} with tasks (every task id) and timeout_s: ${AWAIT_SECONDS}, and repeat it until every task is done.`,
+    `Dispatch every routed subagent with ${DELEGATE_TOOL}(tier, brief, wait: false) in one message. Then call ${AWAIT_TOOL} with tasks (every task id) and timeout_s: ${AWAIT_SECONDS}, and repeat it until every task is done. A task whose result an await reply does not show must be read with ${TASKS_TOOL}(task) before it is used.`,
     'A queued task has not launched yet: no child is running and it starts when its endpoint has room. A task\'s launch time is its `started` time; the time it waited does not count.',
     `If ${DELEGATE_TOOL} is refused or returns a tool error and made no task, pass that subagent back: call Agent with the same prompt and a short description that begins with \`${PASSBACK_WORD}\`. Once a task id came back the work stays with subzero, even if its result fails; never pass it back.`,
   );

@@ -69,15 +69,18 @@ describe('TaskCore', () => {
     expect(runs[1]!.request.driverFilesFolder).not.toBe(runs[0]!.request.driverFilesFolder);
   });
 
-  it('cuts a long summary with a marker, keeps the status and puts the task id first', async () => {
-    const { core, port, runs, agent } = setup();
-    const task = core.start({ agent, port, brief: 'b' });
-    task.release();
-    runs[0]!.settle({ lastAssistantText: 'line\n'.repeat(3000), status: 'completed', usage });
-    const result = await task.result;
-    expect(Object.keys(result)[0]).toBe('taskId');
-    expect(result.status).toBe('completed');
-    expect(result.summary).toContain(`subzero show ${task.taskId}`);
+  it('keeps a long summary whole, whatever its status, and puts the task id first', async () => {
+    for (const status of ['completed', 'truncated'] as const) {
+      const { core, port, runs, agent } = setup();
+      const task = core.start({ agent, port, brief: 'b' });
+      task.release();
+      const text = '```ts\n' + 'line\n'.repeat(12_000);
+      runs[0]!.settle({ lastAssistantText: text, status, usage });
+      const result = await task.result;
+      expect(Object.keys(result)[0]).toBe('taskId');
+      expect(result.status).toBe(status);
+      expect(result.summary).toBe(text);
+    }
   });
 
   it('gives a failed run its failure kind and a cancelled run none', async () => {

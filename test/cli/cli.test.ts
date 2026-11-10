@@ -37,6 +37,20 @@ describe('Cli', () => {
     expect(JSON.parse(readFileSync(path.join(dir, 'task.json'), 'utf8')).brief).toBe('do the thing');
   });
 
+  it('prints a long final message whole and tells the child no reply size', async () => {
+    const root = makeProject();
+    const long = 'FINDING-'.repeat(2500);
+    const { run, out } = cli(root, { lastText: long });
+    expect(await run('run', '--agent', 'helper', 'go')).toBe(0);
+    const text = out.join('\n');
+    expect(text).toContain(`summary:\n${long}\nusage:`);
+    expect(text).not.toMatch(/\[subzero|cut/);
+    const taskId = /sz-[a-z2-7]{6}/.exec(text)![0];
+    const record = JSON.parse(readFileSync(path.join(root, '.agents', 'subzero', 'tasks', taskId, 'task.json'), 'utf8'));
+    expect(record.brief).toBe('go');
+    expect(record.brief).not.toMatch(/Reply size/);
+  });
+
   it('prints the unknown agent error and exits non-zero without making a task', async () => {
     const root = makeProject();
     const { run, err } = cli(root);

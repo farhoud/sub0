@@ -1,17 +1,23 @@
-// @sigil implements design/mcp-server.sigil McpServer (bounded tool results, listing)
+// @sigil implements design/mcp-server.sigil McpServer (tool result limit, await reply, listing)
 //
-// What is specific to the MCP tool replies: the bound, the equal share of an await
-// reply and the listing cap. The wording of a task's state comes from the service.
+// What is specific to the MCP tool replies: the tool result limit, the reply
+// budget it leaves a child, the whole-or-deferred sections of an await reply and
+// the listing cap. The wording of a task's state comes from the service.
 import type { CollectReply, DelegateReply, TaskListing } from '../service/delegation-service.js';
 import { formatResult, formatStatusLine, listingStatus, statusFacts, withNotice } from '../service/status-text.js';
 
-/** No tool result may exceed this, whatever it holds. */
-export const TOOL_RESULT_LIMIT = 12_000;
+/**
+ * Claude Code's inline limit for an MCP tool result: a longer text result is not
+ * truncated but saved to a file in the session's tool-results folder, and Claude
+ * is given its path (https://code.claude.com/docs/en/mcp, "MCP output limits and
+ * warnings"). No reply is cut to it; an await reply defers the sections past it.
+ */
+export const TOOL_RESULT_LIMIT = 50_000;
+/** Room kept in a reply for the result's header line, notice and usage line. */
+export const REPLY_RESERVE = 2_000;
+/** What a child is told its final reply should stay under, so its result fits inline. */
+export const REPLY_BUDGET_CHARS = TOOL_RESULT_LIMIT - REPLY_RESERVE;
 export const LISTING_CAP = 50;
-
-export function bound(text: string): string {
-  return text.length <= TOOL_RESULT_LIMIT ? text : `${text.slice(0, TOOL_RESULT_LIMIT - 40)}\n[subzero: output bounded]`;
-}
 
 /** The status line of a reply that carries no result, or undefined for the other kinds of reply. */
 function replyStatusLine(reply: DelegateReply | CollectReply, now: number): string | undefined {
@@ -43,25 +49,35 @@ export function describeReply(reply: DelegateReply | CollectReply, view?: { agen
   return withNotice(describeOne(reply, view, now), 'notice' in reply ? reply.notice : undefined);
 }
 
-/**
- * One section of an await reply, cut to its share of the tool result limit. A cut
- * section ends with the way to read the whole result.
- */
-export function describeShare(reply: CollectReply, share: number, now = Date.now()): string {
-  const full = describeReply(reply, undefined, now);
-  if (full.length <= share) return full;
-  const id = reply.kind === 'result' ? reply.result.taskId : reply.taskId;
-  const pointer = `\n[cut; whole result: tasks(${id})]`;
-  return full.slice(0, Math.max(0, share - pointer.length)) + pointer;
+/** The one line of an await reply that stands for a result left out for the reply's size. */
+function deferredLine(reply: Extract<CollectReply, { kind: 'result' }>): string {
+  const { taskId, agent, status } = reply.result;
+  return `task: ${taskId} · ${agent} · ${status} · result not shown here (reply size); read it whole with tasks(${taskId})`;
 }
 
-/** The equal share of the tool result limit of each of `count` sections joined by a blank line. */
-export function sectionShare(count: number): number {
-  return Math.floor((TOOL_RESULT_LIMIT - 2 * (count - 1)) / count);
+/**
+ * An await reply: one section per task, in the order asked. A result is never cut.
+ * Each result section is given whole while the joined reply stays within the limit,
+ * and the first is always given whole, even alone over the limit, since Claude Code
+ * then saves the reply to a file and loses nothing. A later result that does not
+ * fit is deferred to one line that points to tasks(<id>). A task with no result
+ * keeps its status line.
+ */
+export function formatAwait(replies: CollectReply[], limit = TOOL_RESULT_LIMIT, now = Date.now()): string {
+  const sections: string[] = [];
+  let length = 0;
+  for (const reply of replies) {
+    const whole = describeReply(reply, undefined, now);
+    const joined = length + (sections.length > 0 ? 2 : 0) + whole.length;
+    const section = reply.kind === 'result' && sections.length > 0 && joined > limit ? deferredLine(reply) : whole;
+    length += (sections.length > 0 ? 2 : 0) + section.length;
+    sections.push(section);
+  }
+  return sections.join('\n\n');
 }
 
 function describeOne(reply: DelegateReply | CollectReply, view: { agent: string; createdAt: string } | undefined, now: number): string {
-  if (reply.kind === 'result') return bound(formatResult(reply.result));
+  if (reply.kind === 'result') return formatResult(reply.result);
   const id = `task: ${reply.taskId}`;
   const lead = view !== undefined ? `${id} · ${view.agent}` : id;
   const line = replyStatusLine(reply, now);
@@ -99,5 +115,5 @@ export function formatListing(tasks: TaskListing[], conversationKnown: boolean, 
   if (shown.length === 0) lines.push('no tasks');
   for (const t of shown) lines.push(`${t.taskId} · ${t.agent} · ${listingStatus(t, now)} · created ${t.createdAt}`);
   lines.push(`${left} ${left === 1 ? 'task was' : 'tasks were'} left out; any task can still be read by its task id with tasks(task).`);
-  return bound(lines.join('\n'));
+  return lines.join('\n');
 }

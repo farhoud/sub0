@@ -371,20 +371,55 @@ describe('McpServer tiers, general, fallback and await bounds', () => {
     expect(await staticText()).toBe(broken);
   });
 
-  it('covers F1: await over six finished tasks returns every section, and each cut one ends with the tasks pointer', async () => {
-    const { call, textOf } = await connect({ lastText: 'FINDING-'.repeat(1000) }, null, undefined, TIERED_YAML);
+  it('returns a 20,000-character final message whole from delegate, tasks and await', async () => {
+    const long = 'FINDING-'.repeat(2500);
+    const { call, textOf } = await connect({ lastText: long }, null, undefined, TIERED_YAML);
+    const waited = textOf(await call('delegate', { agent: 'free', brief: 'go' }));
+    expect(waited).toContain(`summary:\n${long}\nusage:`);
+    const id = taskIdOf(waited);
+    expect(textOf(await call('tasks', { task: id }))).toContain(`summary:\n${long}\nusage:`);
+    const later = taskIdOf(textOf(await call('delegate', { agent: 'free', brief: 'go', wait: false })));
+    const awaited = textOf(await call('await', { tasks: [later], timeout_s: 20 }));
+    expect(awaited).toContain(`summary:\n${long}\nusage:`);
+    for (const reply of [waited, awaited]) expect(reply).not.toMatch(/\[cut|\[subzero|bounded/);
+  });
+
+  it('covers F1: await over six 9,000-character results returns the first five whole and defers the sixth', async () => {
+    const long = 'FINDING-'.repeat(1125);
+    const { call, textOf } = await connect({ lastText: long }, null, undefined, TIERED_YAML);
     const ids: string[] = [];
     for (let i = 0; i < 6; i++) ids.push(taskIdOf(textOf(await call('delegate', { agent: 'free', brief: `go ${i}`, wait: false }))));
     const joined = textOf(await call('await', { tasks: ids, timeout_s: 20 }));
-    expect(joined.length).toBeLessThanOrEqual(12_000);
+    expect(joined.length).toBeLessThanOrEqual(50_000);
+    expect(joined).not.toMatch(/\[cut|\[subzero|bounded/);
     const sections = joined.split('\n\n');
     expect(sections.length).toBe(6);
-    for (const id of ids) {
-      const section = sections.find((s) => s.startsWith(`task: ${id}`));
-      expect(section, id).toBeDefined();
-      expect(section).toMatch(/status: completed/);
-      expect(section!.trimEnd().endsWith(`tasks(${id})`) || section!.trimEnd().endsWith(`tasks(${id})]`)).toBe(true);
-    }
+    ids.forEach((id, i) => expect(sections[i]!.startsWith(`task: ${id}`), id).toBe(true));
+    for (const section of sections.slice(0, 5)) expect(section).toContain(`status: completed\nsummary:\n${long}\nusage:`);
+    expect(sections[5]).toBe(
+      `task: ${ids[5]} · free · completed · result not shown here (reply size); read it whole with tasks(${ids[5]})`,
+    );
+  });
+
+  it('returns a first await result whole even when alone it exceeds 50,000 characters, and defers the next', async () => {
+    const long = 'FINDING-'.repeat(7000);
+    const { call, textOf } = await connect({ lastText: long }, null, undefined, TIERED_YAML);
+    const a = taskIdOf(textOf(await call('delegate', { agent: 'free', brief: 'a', wait: false })));
+    const b = taskIdOf(textOf(await call('delegate', { agent: 'free', brief: 'b', wait: false })));
+    const joined = textOf(await call('await', { tasks: [a, b], timeout_s: 20 }));
+    expect(joined.startsWith(`task: ${a}`)).toBe(true);
+    expect(joined).toContain(`summary:\n${long}\nusage:`);
+    expect(joined.length).toBeGreaterThan(56_000);
+    expect(joined.endsWith(`\n\ntask: ${b} · free · completed · result not shown here (reply size); read it whole with tasks(${b})`)).toBe(true);
+  });
+
+  it("tells the child the reply budget in the brief of the server's delegations", async () => {
+    const { call, textOf, service } = await connect({}, null, undefined, TIERED_YAML);
+    const id = taskIdOf(textOf(await call('delegate', { agent: 'free', brief: 'go', expected_output: 'A list.' })));
+    expect(service.store.readTask(id)!.task!.brief).toBe(
+      'go\n\n## Expected output\n\nA list.\n\n' +
+        '## Reply size\n\nKeep your final reply under 48,000 characters. It is returned to the parent whole, never cut.',
+    );
   });
 
   it('returns a short result whole in an await, with no pointer', async () => {

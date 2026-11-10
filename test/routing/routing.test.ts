@@ -78,6 +78,12 @@ describe('routing text', () => {
     expect(text).toMatch(/queued[^\n]*not (been )?launched/);
   });
 
+  it('tells Claude to read a task whose result an await reply does not show with the tasks tool before using it', () => {
+    const text = textFor(project(config('medium')));
+    expect(text).toMatch(/result[^\n]*await reply[^\n]*not show[^\n]*mcp__plugin_subzero_subzero__tasks[^\n]*before/);
+    expect(text).not.toMatch(/\bcut\b/);
+  });
+
   it('keeps fork and worktree spawns on the Agent tool', () => {
     expect(textFor(project(config('medium')))).toMatch(/fork[^\n]*worktree[^\n]*(stay|stays)[^\n]*Agent tool/i);
   });
