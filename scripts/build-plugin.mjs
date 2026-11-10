@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { repositoryUrl } from './repository.mjs';
 
 const BUNDLES = ['agent-hook', 'cli', 'hook', 'server'];
 
@@ -55,15 +56,6 @@ function readJson(file) {
   }
 }
 
-/** The canonical https URL of the GitHub repository named by package.json `repository`. */
-function repositoryUrl(repository) {
-  const raw = typeof repository === 'string' ? repository : repository?.url;
-  if (typeof raw !== 'string' || raw === '') return fail('package.json has no repository url');
-  const match = raw.match(/^(?:git\+)?(?:https?:\/\/(?:www\.)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/|github:)?([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/);
-  if (!match) return fail(`cannot read a GitHub repository from package.json repository "${raw}"`);
-  return `https://github.com/${match[1]}`;
-}
-
 const options = parseArgs(process.argv.slice(2));
 const root = path.resolve(options.root ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const out = path.resolve(options.out);
@@ -75,7 +67,12 @@ const version = manifest.version;
 if (typeof version !== 'string' || version === '') fail('.claude-plugin/plugin.json has no version');
 if (pkg.version !== version) fail(`version mismatch: plugin.json says ${version} but package.json says ${pkg.version}`);
 if (options.tag !== undefined && options.tag !== `v${version}`) fail(`tag mismatch: the tag is ${options.tag} but the version is ${version} (expected v${version})`);
-const repository = repositoryUrl(pkg.repository);
+let repository;
+try {
+  repository = repositoryUrl(pkg.repository);
+} catch (error) {
+  fail(error.message);
+}
 
 // 5. Preconditions, before anything is written.
 const missing = BUNDLES.filter((name) => !existsSync(path.join(root, 'dist', `${name}.js`)));
