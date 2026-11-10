@@ -4,7 +4,7 @@
 }
 @design/mcp-server.sigil from McpServer import {
   readiness marker, plugin data folder, SessionStart hook, delegate tool,
-  await tool,
+  await tool, tasks tool, deferred line,
 }
 @design/kernel.sigil from Kernel import { parent adapter }
 @design/delegation-service.sigil from DelegationService import {
@@ -107,7 +107,10 @@ component RoutingHooks {
     queued task has not launched yet and that a task's launch time is its
     start time, and that when the delegate tool is refused or returns a tool error
     and made no task it must pass the subagent back through a pass-back, and that
-    once a task id came back the work stays with subzero.
+    once a task id came back the work stays with subzero. It must say, in one
+    sentence, that a task whose result an await reply does not show, which the
+    await tool gives as a deferred line, must be read with the tasks tool
+    before it is used.
 
     The routing text must stay far below the 10,000-character limit that Claude
     Code puts on added context, because it is added again at every session

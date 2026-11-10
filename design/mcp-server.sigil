@@ -1,5 +1,6 @@
 @design/delegation-service.sigil from DelegationService import {
     delegation, brief text, queue place, queued task, status line, result text,
+    reply budget,
 }
 @design/kernel.sigil from Kernel import {
   parent adapter, supported host, entry point,
@@ -58,9 +59,23 @@ component McpServer {
     DelegationService, so that a queued task of this process names the model
     endpoint, the queue place and the time waited, a queued task of another
     process names the model endpoint and the time waited with no queue place, and
-    a task whose child run has a start time gives that start time. McpServer adds
-    only what is its own: the bound, the equal share, the listing cap and the
+    a task whose child run has a start time gives that start time. An await
+    reply may give a deferred line instead of a result text. McpServer adds
+    only what is its own: the tool result limit, the deferred line, the
+    reply budget it gives each delegation, the listing cap and the
     progress notification.
+
+    The *tool result limit* is Claude Code's inline limit for an MCP tool
+    result, 50,000 characters. Claude Code does not truncate a longer text
+    result: it saves it to a file in the session's tool-results folder and
+    gives Claude its path. The reply budget that the server gives each
+    delegation is the tool result limit less a reserve for the first line, the
+    notice and the usage line of a result text, 48,000 characters.
+
+    A *deferred line* stands in an await reply for the result of a settled
+    task that did not fit: one line with the task id, the agent and the
+    task status, saying that the result is not shown here for the reply's size
+    and that the tasks tool with that task id reads it whole.
 
     The *plugin data folder* is the folder that Claude Code gives the plugin for
     its own files. It holds the recorded parent session id of each session of
@@ -81,17 +96,21 @@ component McpServer {
     static text, and the tools are still listed.
 
     On a delegate call that waits, make a delegation with the parent session id of
-    the caller. When the request carries a progress token, send a
-    progress notification to the caller for each domain event, at most once a
-    second with the latest message line, and after every 30 seconds of silence,
-    including while the child run is Pending. A silent heartbeat repeats the latest
-    message line with the new elapsed time. Sending the progress notification ends
-    that branch. Return the result when the task settles, which ends the flow.
+    the caller and the reply budget. When the request carries a progress token,
+    send a progress notification to the caller for each domain event, at most
+    once a second with the latest message line, and after every 30 seconds of
+    silence, including while the child run is Pending. A silent heartbeat
+    repeats the latest message line with the new elapsed time. Sending the
+    progress notification ends that branch. Return the result when the task
+    settles, which ends the flow.
 
-    On a delegate call that does not wait, return the task id at once with its
-    status line, which ends that flow. A later await call returns the result of
-    each task that has settled, or the status line of a task that has not when
-    the await timeout ends, and the flow ends there.
+    On a delegate call that does not wait, make the delegation the same way and
+    return the task id at once with its status line, which ends that flow. A
+    later await call waits up to its timeout and then answers for each task id
+    in the order asked: the status line of a task that has not settled, and for
+    a settled task its result text whole while the joined reply stays within the
+    tool result limit, the first section always, or else its deferred line. The
+    flow ends there.
 
     When Claude Code cancels a waited call with notifications/cancelled, cancel its
     task, which ends the flow.
@@ -109,11 +128,14 @@ component McpServer {
     the conversation, and they must not say that a delegation needs a configured
     agent definition, because the general agent runs work that names none.
 
-    Every tool must return a bounded result and none may return a transcript.
+    No tool may cut a result or return a transcript. The delegate tool, the
+    tasks tool and the cancel tool return a result text whole, whatever its
+    length.
 
-    An await reply must give each collected task an equal share of the
-    *tool result limit*, and a section cut to its share must end by naming
-    the tasks tool with that task id as the way to read the whole result.
+    An await reply must give each result whole or as a deferred line, and
+    never a part of one. Its first section is always whole, even when alone it
+    is over the tool result limit, and every later result text is whole only
+    while the joined reply stays within the tool result limit.
 
     No reply of the delegate tool, the tasks tool or the await tool may call a
     queued task started or
@@ -226,9 +248,16 @@ component McpServer {
     next listing shows the new routable tier set, and with a broken agent file
     the tools are still listed with the static description.
 
-    An await over six settled tasks whose results together exceed the
-    tool result limit returns a section for every task, and each cut section
-    ends with the pointer to tasks with its task id.
+    A delegate call that waits for a final message of 20,000 characters
+    returns it whole, and the tasks tool and the await tool return it whole.
+
+    An await over six settled tasks whose result texts are about 9,000
+    characters each returns the first five whole and a deferred line for the
+    sixth, with no cut anywhere, within the tool result limit. An await whose
+    first result alone is over the tool result limit returns it whole and gives
+    a deferred line for the next settled task.
+
+    The brief of a delegation from the server ends with its reply budget.
   }
 
   interface {
@@ -249,9 +278,12 @@ component McpServer {
     one task by its task id. Bound a listing to 50 tasks and say how many it left
     out.
 
-    Let the *await tool* collect the result of tasks started without waiting, and
-    let
-    the cancel tool end a task as cancelled.
+    Let the *await tool* collect the result of tasks started without waiting,
+    each whole or as a deferred line, and let the cancel tool end a task as
+    cancelled.
+
+    Give each delegation of the delegate tool the reply budget, so that the
+    child knows the size its final reply should stay under.
 
     Report each task that has no result by its status line in the replies of
     delegate, tasks and await, so that a queued task is never reported as
@@ -287,8 +319,15 @@ component McpServer {
     ran. Queued is derived and not stored because the start-up sweep, the
     listing and the command line all key on the task status running. The
     status line says this session's queue because the queue place is counted
-    per process. Each task in an await gets its own share of the
-    tool result limit so that one long result never hides the findings of the
-    others.
+    per process.
+
+    A result is never cut, because a cut result made whether the parent got a
+    whole answer depend on how long the child wrote, and cut JSON did not
+    parse. Claude Code saves a reply over its inline limit to a file instead of
+    truncating it, so the first section of an await reply is always whole and
+    the rest are deferred, not cut. The tool result limit is that inline limit
+    and the reply budget sits under it, so a child that keeps to it is shown
+    inline. This replaces the equal share of a smaller limit that each task in
+    an await reply once had.
   }
 }

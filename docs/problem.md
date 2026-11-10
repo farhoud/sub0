@@ -83,7 +83,7 @@ around them.
 - G1: YAML defines skill-scoped agents. It is versionable, reviewable and works across hosts. The
   definition can live in the workspace (`.agents/subzero.yaml`), be shipped with the skill itself
   (`agents/subzero.yaml`), or both, with the workspace taking precedence.
-- G2: The parent context grows only by the delegation request and a bounded result.
+- G2: The parent context grows only by the delegation request and the result (the child's final answer, never its transcript).
 - G3: Any supported parent can call a child on any supported host. Mixed pairs, such as a Claude Code
   parent with a pi + Qwen child, are a first-class case.
 - G4: The core manages child lifecycle and state: start, stream, follow-up, cancel, timeout and cleanup.
@@ -119,7 +119,7 @@ honest about that and could compile to native features where that is possible (s
 ## Success criteria
 
 - A parent in each of Claude Code, Codex and pi can list the agents, delegate a task, and get a result.
-  The parent's context grows by at most the result budget, 2k tokens by default.
+  The parent's context grows by the child's final answer only, whole; the brief tells the child a reply budget.
 - The child's loaded-skill set, checked from the host's own init event, equals the declared set.
 - A child that hangs, crashes or overruns its budget is reported as a typed failure. It never hangs
   the parent.

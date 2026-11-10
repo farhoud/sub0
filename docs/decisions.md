@@ -22,7 +22,7 @@ make each choice explicitly.
 | D13 | Skill sources | local only / + git / + npm / + registry | Local + git (pinned in `subzero.lock`) | It matches compose's `build:` and image usage. A registry is out of scope. |
 | D14 | Recursion | allow children to use subzero / forbid | Allow, but only to the agents listed in the child's `delegates:`, with `maxDepth: 2` passed down via env (`SUBZERO_DEPTH`). Nested children share the parent's parallel limit; a waiting run lends its place under that limit to its child. | Real skills need it once they are delegated whole: sigil-evaluate on pi would start its own interpreter children, and sigil-write starts a fresh evaluator. The spike avoids it by running sigil-evaluate as a native Claude subagent (target-claude-pi.md §6.1); it lands in v0.1. The allow-list and depth limit stop fork bombs and cycles; lending a place under the parallel limit stops a depth-2 deadlock on a single local GPU. |
 | D15 | Trigger mechanism | explicit tool / proxy skill / host interception hooks | Explicit tool + **proxy skills** (work on all hosts); hooks are optional extras | Interception depends on undocumented schemas (Claude `Skill` tool input). A proxy `SKILL.md` is portable and cheap. |
-| D16 | Result contract | free text / text + structured / full transcript | Bounded summary (default 2k tokens) + optional JSON (via `--json-schema`, `--output-schema`, or validated by the core for pi) + `runId`. No changed-file list: the user reviews the tree with git | The transcript stays in the run log. Returning it would recreate the problem. |
+| D16 | Result contract | free text / text + structured / full transcript | The child's whole final message as the summary, never cut (the 2k-token bounded summary was reversed by 24 below) + optional JSON (via `--json-schema`, `--output-schema`, or validated by the core for pi) + `runId`. No changed-file list: the user reviews the tree with git | The transcript stays in the run log. Returning it would recreate the problem. |
 | D17 | Where agent definitions come from | workspace `.agents/subzero.yaml` only / skill manifest only / **both, layered** | **Both.** A skill ships a recommended `agents/subzero.yaml`; the workspace and user config override it or turn it off. Skill manifests use model tiers, can't grant permissions and can't add skill sources. | Skill authors know how their skill should run, and the workspace owns endpoints, permissions and trust. This is the same split as a Dockerfile (author) and a compose file (operator). See design §4.1. |
 | D18 | Isolation boundary | (a) throwaway config home per run; (b) **real home + launch flags + skill overlay**; (c) persistent per-agent home | **(b)**; (c) only as a fallback for a host whose flags can't isolate skills; never (a) | (b) keeps the user's login (no API keys needed), keeps sessions where the host's own resume/fork tools find them, and never copies credentials. pi can do (b) today (tested); claude has the flags but CLAUDE.md loading is unverified; codex needs a spike for *adding* overlay skills. |
 | D19 | Identity the parent holds | run id (one process) / child session id / **task id 1:1 with a child session** | **Task id** (`sz-xxxxxx`), also used as the child's session id where the host accepts one (pi); claude (UUID only) and codex (assigns its own) are mapped in the task index. Runs (processes) and turns sit under it. A new session always means a new task with lineage. | The parent needs one handle that survives the child exiting, respawning, compaction and `/clear`. A 1:1 task–session mapping keeps "continue X" unambiguous. Fork and rerun stay traceable. |
@@ -40,8 +40,9 @@ make each choice explicitly.
 - **P3. Context starvation.** The child knows nothing the parent knew. Thin briefs give confident but
   wrong results. Mitigate with tool description guidance, a `Brief` with `files` and `expectedOutput`
   fields, and letting the child return `questions` instead of guessing.
-- **P4. The result pollutes the parent anyway.** Unbounded results defeat the purpose. The core
-  enforces the budget, not the child.
+- **P4. The result pollutes the parent anyway.** A long result costs parent context. The child is told
+  a reply budget in its brief; the core never cuts the result, because a cut answer or cut JSON is worse
+  than a long one (decision 24 below).
 - **P5. Trusting the child's result.** The parent can't see the child's work. Return the task id, so the
   parent can `ask` about the work or read its report, and the user can `subzero show` or `attach` it.
   subzero does not return a changed-file list: git is the record, and the README warns the user to review
@@ -170,8 +171,8 @@ apply to the spike; the contracts win where they differ from the rest of these d
    refused. Progress is one line from the latest event, at most once a second, with a 30 s heartbeat.
 7. No git status recording and no changed-file list. The user is warned in the README and reviews the tree
    with git.
-8. `cancelled` is a status only; failure kinds are timeout, crashed, error and skill_mismatch. A budget cut
-   does not set `truncated`, which means only the stop reason `length`.
+8. `cancelled` is a status only; failure kinds are timeout, crashed, error and skill_mismatch. `truncated`
+   means only the stop reason `length`; a result is never cut (24).
 9. The store folder `.agents/subzero/` is owner-only and holds its own `.gitignore` containing `*`; the
    user's own `.gitignore` is never edited.
 10. `timeout` is required, in seconds, from spawn to settlement, and does not count time spent `Pending`.
@@ -227,3 +228,14 @@ apply to the spike; the contracts win where they differ from the rest of these d
     anyway); it adds a missing `default` tier to a file that holds agents and refuses, naming both hosts, when the file has a
     `default` tier on another host. The driver-registry error is kept as a defensive duplicate of the tier error and returns
     with the same pass-back pointer. `agent name` stays plain prose.
+24. (2026-11-10) **Results are never cut.** A result's summary is the child's whole last assistant message: the 2000-token
+    result budget and its cut with a marker are gone. `await` returns each collected result whole, in the order asked,
+    while the joined reply stays within the MCP tool result limit; the first is always whole, and a later one that does
+    not fit is not cut but listed on one line that says to read it whole with `tasks(<id>)`. The tool result limit is
+    Claude Code's MCP inline limit, 50,000 characters, and the child is told a reply budget of that size less a reserve
+    for the reply's own lines (48,000) in a "Reply size" section of its brief, which the MCP server passes and the CLI
+    does not; the core holds no size. Why: a cut result made whether the parent got a whole answer depend on how long
+    the child wrote, and cut JSON did not parse, while Claude Code does not truncate an MCP result over its limit but
+    saves it to a file in the session's tool-results folder and gives Claude the path (code.claude.com/docs/en/mcp,
+    "MCP output limits and warnings"), so nothing is lost by sending it whole. This reverses the equal share of the
+    result limit per `await` section (KTD11 and R22 of the tiered routing plan) and the earlier result budget (D16).

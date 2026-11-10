@@ -25,7 +25,11 @@ component DelegationService {
   state {
     A *delegation* is the request of a front end. It holds an optional agent
     name, an optional model tier, a *brief text*, optional files, an optional
-    expected output and an optional parent session id.
+    expected output, an optional *reply budget* and an optional
+    parent session id. The reply budget is the number of characters that the
+    child's final reply should stay under. Only a front end that knows how its
+    parent receives a result gives one, and DelegationService holds no size of
+    its own.
 
     The *live task registry* holds the tasks that this process has started, by
     their task id.
@@ -97,19 +101,19 @@ component DelegationService {
     of supported hosts, so a request that resolves to any tier gives the tier
     error that names the host and lists no supported host, before the driver
     registry is asked, and no task is made.
-    Otherwise render the files and the expected output after the brief text into
-    one brief, start the task in TaskCore with that agent definition, that brief,
-    that child port and the parent session id, and add the task to
-    the live task registry, which a later collect or cancel reads. When the
-    child runs of its model endpoint in this process that are Starting or Live
-    have reached its parallel limit, keep the child run Pending at the next
-    queue place and release it, first come first served, when one of them ends,
-    and otherwise release it at once. When the caller waits, offer each
-    domain event to the caller and return the result when the child run
-    settles, which ends the flow. When the caller does not wait, return the
-    task id at once with the start time of a released child run, or with the
-    model endpoint, the queue place and the enqueue time of a Pending one,
-    which ends the flow.
+    Otherwise render the files, the expected output and the reply budget after
+    the brief text into one brief, start the task in TaskCore with that
+    agent definition, that brief, that child port and the parent session id,
+    and add the task to the live task registry, which a later collect or
+    cancel reads. When the child runs of its model endpoint in this process
+    that are Starting or Live have reached its parallel limit, keep the
+    child run Pending at the next queue place and release it, first come first
+    served, when one of them ends, and otherwise release it at once. When the
+    caller waits, offer each domain event to the caller and return the result
+    when the child run settles, which ends the flow. When the caller does not
+    wait, return the task id at once with the start time of a released
+    child run, or with the model endpoint, the queue place and the
+    enqueue time of a Pending one, which ends the flow.
 
     Before a collect, a cancel or a listing, run the start-up sweep again, so
     that a task whose owner process died after start-up is not shown as
@@ -151,9 +155,12 @@ component DelegationService {
     other delegation.
 
     The brief that the service renders must start with the brief text unchanged,
-    followed by a Files section and an Expected output section only when they are
-    present. A delegation with an empty brief text must be refused whatever its
-    files hold, and the paths of its files are not checked.
+    followed by a Files section, an Expected output section and a Reply size
+    section, each only when it is present. The Reply size section asks the child
+    to keep its final reply under the reply budget and says that the reply is
+    returned to the parent whole and never cut. A delegation with an empty
+    brief text must be refused whatever its files hold, and the paths of its
+    files are not checked.
 
     Every start-up of a front end, whether the server or a command, must go through
     the start-up of the service, so that the start-up sweep runs at every start-up.
@@ -239,6 +246,10 @@ component DelegationService {
     A delegation with files and an expected output gives a brief that starts with
     the brief text, then lists the files and the expected output.
 
+    A delegation with a reply budget of 48,000 characters gives a brief that
+    ends with a Reply size section that names 48,000 characters, and a
+    delegation with no reply budget gives a brief with no Reply size section.
+
     A collect of a task whose owner process died after the server started says
     that the task is abandoned and has no result, because the sweep ran again
     before the collect.
@@ -251,10 +262,11 @@ component DelegationService {
   }
 
   interface {
-    Accept a delegation with an optional agent name and an optional model tier,
-    refuse it when its brief text is empty, and return the result with the
-    task id first once the child run settles, or return the task id at once
-    when the caller does not wait, with the start time of a released child run,
+    Accept a delegation with an optional agent name, an optional model tier and
+    an optional reply budget, which the brief tells the child, refuse it when
+    its brief text is empty, and return the result with the task id first once
+    the child run settles, or return the task id at once when the caller does
+    not wait, with the start time of a released child run,
     or the model endpoint, the queue place and the enqueue time of a Pending
     one. When the named agent is not configured and the fallback agent runs
     instead, return the report that the named agent is not configured with
@@ -297,7 +309,9 @@ component DelegationService {
     start-up sweep, the agent lookup and the live task registry one owner instead
     of one for each front end. The files and the expected output are rendered into
     the brief text because the child port carries one brief, and the fields exist
-    to push a parent toward a fuller brief.
+    to push a parent toward a fuller brief. The reply budget is a field of the
+    delegation and not a size of the service, because the size a parent can
+    take inline is known only to the front end that returns the result.
 
     A task that runs the fallback agent records its agent as fallback and not as
     general, because its tool list is its own and not that of the general agent. A
@@ -314,8 +328,8 @@ component DelegationService {
     state is shared by every front end, and a front end that imported it from
     another front end would depend on a parent adapter, which the Kernel forbids
     of every core service, the command line included. The queued view is
-    derived here, so its wording sits beside it. Bounding a reply, sharing the
-    tool result limit and ordering a listing stay with the front end that needs
+    derived here, so its wording sits beside it. Fitting a reply to the limit of
+    its parent and ordering a listing stay with the front end that needs
     them.
   }
 }

@@ -9,7 +9,7 @@
 component TaskCore {
   goal {
     Run each *task* from an agent definition and a brief on one child, keep it in a
-    durable task record, and return one bounded *result*.
+    durable task record, and return one *result*.
   }
 
   state {
@@ -32,8 +32,8 @@ component TaskCore {
     A result has a status of completed, truncated, failed or cancelled. It holds
     the task id first, a *summary* and the *session usage*, and a failed result
     also holds its failure kind. The status truncated means only that the child
-    stopped at its own length limit. The summary is cut to the *result budget*,
-    fixed at 2000 tokens and counted by estimate.
+    stopped at its own length limit. The summary is the whole last assistant
+    message of the child run.
 
     A session usage is the token count, the cost and the context use at settle of a
     child run, as its driver reports them. Each field is optional, and a field that
@@ -73,7 +73,8 @@ component TaskCore {
     it to the caller, which ends that branch. When the run started event arrives,
     write the launch spec it carries into the task record without reading it, which
     ends that branch. When the child run settles, build the result with the task id
-    first, the summary cut to the result budget and the session usage. The result
+    first, the whole last assistant text as the summary and the session usage.
+    The result
     goes to the final step. A failed child run builds its result with its
     failure kind, and a cancelled child run builds it with the status cancelled and
     no failure kind. Both go to the same final step. In the final step, write the
@@ -105,12 +106,10 @@ component TaskCore {
     A cancelled child run that is still Pending must never start a child. It
     has the status cancelled, no failure kind, no session usage and no summary.
 
-    A summary longer than the result budget must be cut keeping its head at a line
-    boundary, with an open code fence closed, and must end with a visible marker
-    that names the omitted amount and says that subzero show with the task id has
-    the full text. The cut leaves the status unchanged, an empty summary stays
-    empty, and a truncated result whose summary is over the result budget carries
-    the marker as well.
+    The summary must never be cut, whatever its length or status, and an empty
+    summary stays empty. TaskCore holds no size for a summary: a front end that
+    knows how its parent receives a result may tell the child a size in the
+    brief.
 
     A field of the session usage that the child run cannot report must be marked
     unavailable and never reported as zero.
@@ -128,8 +127,8 @@ component TaskCore {
   }
 
   cases {
-    A summary longer than the result budget is cut with a visible marker, the
-    status stays completed, and the task id is still first in the result.
+    A summary of 60,000 characters, or of a truncated result, is returned whole
+    with its status unchanged, and the task id is still first in the result.
 
     A child run whose last assistant message has the stop reason error is Failed
     with the failure kind error, and a cancelled child run carries no failure kind.
@@ -184,10 +183,10 @@ component TaskCore {
     a status and not a failure kind, because a failure kind belongs to a failed
     result that a parent received. The launch spec is a shape of TaskCore and not
     of any child driver, so that TaskCore, TaskStore and Cli carry no driver type.
-    The
-    result budget is fixed because an
-    agent definition has no field for another value, and TaskCore keeps no list of
-    changed files because git is the record and the review of concurrent writers is
-    the user's.
+    The summary is never cut, because a cut answer or cut JSON fails the parent
+    in a way that depends only on how long the child wrote, and the size a parent
+    can take inline belongs to the front end that returns it. TaskCore keeps no
+    list of changed files because git is the record and the review of concurrent
+    writers is the user's.
   }
 }

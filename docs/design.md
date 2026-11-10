@@ -32,13 +32,13 @@ Status: draft · 2026-10-30 · builds on [problem.md](problem.md); integration f
 | **Task** | The unit the parent holds. It has a stable **task id** (`sz-7f3k2q`) and is tied to exactly **one child session** for its whole life. It is continued, asked about, forked and rerun by that id. Like a compose *container*, which survives restarts. |
 | **Child session** | The host's own conversation for a task (the pi session file). It holds the full transcript and never crosses into the parent. |
 | **Run** | One child **process** working on a task. A task can have many runs: the process exits after a turn, and a later `continue` **respawns** it on the same session. |
-| **Turn** | One input to the task (the brief, a follow-up, or an answer), processed until the child settles. Every turn returns exactly one bounded **result**. |
+| **Turn** | One input to the task (the brief, a follow-up, or an answer), processed until the child settles. Every turn returns exactly one **result**. |
 | **Report** | A digest of everything a task did, built from its events without an LLM: turns, files read and changed, commands, skills used, errors, usage. |
 | **Probe** | A read-only fork of a task's session, used to answer a question about the work (`ask`) without touching the main session. |
 | **Workspace** | The filesystem view the child gets: working directory, extra dirs, and the **skill overlay** (a directory holding *only* the declared skills). The host's own home stays the user's real one: same login, same session storage. |
 | **Task record** | `.agents/subzero/tasks/<task-id>/`: the frozen agent, the **launch spec** (exact argv, cwd, host version), the id mapping to the child session and the parent session, runs, turns, results, report and event log. Enough to continue, respawn, fork, rerun, ask, inspect or attach later. |
 | **Launch spec** | A neutral record, defined by the core, of how a driver started a child: the command as an opaque list without the prompt, the working directory, environment variable **names** (never values), the host version, the skill folder paths and the thinking level. Each driver fills it in. |
-| **Result** | What goes back to the parent: status, a summary bounded by the result budget, optional structured output, usage and cost. It carries no changed-file list: the user reviews the tree with git. |
+| **Result** | What goes back to the parent: status, the child's whole final message as the summary (never cut), optional structured output, usage and cost. It carries no changed-file list: the user reviews the tree with git. |
 | **Owner process** | The process that created a task and runs its child, recorded by pid and start time on the task's first index line. |
 | **Start-up sweep** | Marks a task `abandoned` when its latest index line says running and its owner process is gone or has another start time. It signals no process. |
 | **Parallel limit** | An optional cap, per model endpoint, on how many children one process runs at once. Waiting delegations stay `Pending`. |
@@ -167,8 +167,9 @@ Invariants:
 - **The agent is frozen.** `continue` may override only model, thinking and deadlines, which are
   recorded on the Run. Different skills means a new task (`rerun` with another agent). If the YAML has
   changed since the task was created, `continue` keeps the frozen version and says so in the result.
-- **Every turn returns exactly one bounded `Result`.** The core shapes it to `budget.maxResultTokens`.
-  The transcript, tool output and skill content never cross into the parent.
+- **Every turn returns exactly one `Result`.** Its summary is the child's whole final message, never
+  cut; the reply budget in the brief guides its size. The transcript, tool output and skill content
+  never cross into the parent.
 - `depth ≤ policy.maxDepth`, which stops a child from recursively delegating through its own subzero.
 - **When a run ends, the context ends with it; the task stays.** The process group is killed, so the
   skill content in the child's context is gone. The task record and child session are kept until
@@ -243,26 +244,28 @@ Each driver maps its host's stream onto these events:
   usage field the driver cannot report is marked unavailable and is never zero. `needs_input` carries
   `input.kind: question | permission`, matching `InputRequested`. `failed` carries a `reason`:
   `skill_mismatch | timeout | crashed | error`. The task id always comes
-  first, so it survives in the parent's history and after compaction. A summary over the result budget
-  is cut at a line boundary, an open code fence is closed, and a visible marker names the omitted amount
-  and says that `subzero show` has the full text. The cut does not change the status, and an empty
-  summary stays empty.
+  first, so it survives in the parent's history and after compaction. The summary is the child's whole
+  last assistant message and is never cut, so a long answer or a JSON reply reaches the parent intact.
+  Its size is guided, not enforced: a front end that knows its parent's inline limit tells the child a
+  **reply budget** in the brief (the MCP server says 48,000 characters, under Claude Code's 50,000
+  inline limit; a longer reply is saved to a file by Claude Code, not truncated). An empty summary
+  stays empty.
 
 ### 3.5 Knowing what the child did, without its context
 
-The parent gets only what it asks for, always bounded. The child's full context stays in the child
-session.
+The parent gets only what it asks for. The child's full context stays in the child session, and a
+result is the child's final answer only, whole.
 
 | Level | What the parent gets | Size | How it's produced |
 |---|---|---|---|
-| **Result** | Final answer, status, task id | ≤ result budget (2k by default) | Automatically, every turn |
+| **Result** | Final answer, whole, status, task id | Whole; guided by the reply budget in the brief | Automatically, every turn |
 | **Report** | Turns with their inputs, files read and written (from the child's own tool activity, not from git), commands with exit codes, skills used, errors, usage | ≤ ~1k, or one turn | `tasks(task, detail: report)`. A projection of the event log, **no LLM call** |
-| **Ask** | An answer to any question about the work ("why did you choose X?", "which tests did you run?", "show the function you changed") | ≤ result budget | `ask(task, question)`: a **probe** (below) |
+| **Ask** | An answer to any question about the work ("why did you choose X?", "which tests did you run?", "show the function you changed") | Whole; guided by the reply budget in the brief | `ask(task, question)`: a **probe** (below) |
 | **Transcript** | Everything | never sent to the parent | For humans: `subzero show`, `subzero attach` |
 
 **How `ask` works.** The child already holds the full context of its work, so it is the best analyst of
 it. subzero forks the task's session into a **probe task** (`lineage.probeOf`) with a read-only tool set,
-sends the question, and returns the bounded answer. The probe gets its own task id, so its Q&A is kept
+sends the question, and returns the answer whole. The probe gets its own task id, so its Q&A is kept
 for audit.
 - The main session is untouched: later `continue` turns don't see the Q&A.
 - The parent only pays for the answer.
@@ -316,7 +319,6 @@ defaults:                    # agent defaults; host, model and thinking come onl
   timeout: 1800              # example value. Spike: required, in seconds, wall-clock from spawn to settlement,
                              # including skill verification; time spent Pending does not count.
                              # An idle limit (`idle:`) is v0.1.
-  result: { max_tokens: 2000 }
   process: exit              # exit (kill when the task ends) | keep (stay alive for follow-ups, ttl)
   record: keep               # keep (host session + run record kept) | none (nothing written)
   retention: 30d
@@ -505,14 +507,14 @@ directly. That skips subzero and brings back the context pollution. So:
 
 ### 5.1 Tool surface (host-neutral)
 
-Six tools. Every one returns only bounded results; none returns a transcript. On Claude they appear as
+Six tools. None returns a transcript, and none cuts a result: an `await` reply that would pass the parent's inline limit gives the later results as one-line pointers to `tasks(<id>)` instead. On Claude they appear as
 `mcp__plugin_subzero_subzero__<tool>`.
 
 | Tool | Input | Returns | Session effect |
 |---|---|---|---|
 | `delegate` | `agent?`, `tier?`, `brief`, `files?`, `expected_output?`, `from?: {task, mode: fork \| rerun, at_turn?}`, `wait?` | `Result` with a **new task id** | New task + new session. Fork branches from `from.task`'s session (at a turn); rerun starts fresh with the same brief. |
 | `continue` | `task`, `message`, `overrides?: {model, thinking}`, `wait?` | `Result` of the new turn | **Same task, same session.** Respawns the child if its process has exited. |
-| `ask` | `task`, `question` | Bounded answer | Probe task (read-only fork); the main session is untouched |
+| `ask` | `task`, `question` | The answer, whole | Probe task (read-only fork); the main session is untouched |
 | `tasks` | `task?`, `scope?: conversation \| all`, `detail?: list \| report \| turn:<n>` | Task list (id, agent, status, creation time; at most 50, running first, with a notice of how many were left out) or one task's report | None |
 | `await` | `tasks[]`, `timeout_s` | `Result[]` for finished turns | None |
 | `cancel` | `task` | Final status | Aborts the running turn; the task stays continuable |
@@ -651,10 +653,10 @@ sequenceDiagram
     A-->>P: progress notification
   end
   H-->>R: turn done (usage, final text)
-  C->>C: shape Result (budget cut with a marker, no changed-file list)
+  C->>C: shape Result (whole final message, no changed-file list)
   C->>R: run exits → kill process group, keep session + task record
   C-->>A: Result (task id first)
-  A-->>P: bounded result
+  A-->>P: result (whole)
   Note over P,H: later: continue(task) respawns on the same session · ask(task) forks a read-only probe
 ```
 

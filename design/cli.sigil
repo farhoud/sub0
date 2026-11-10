@@ -1,5 +1,5 @@
 @design/delegation-service.sigil from DelegationService import {
-  delegation, brief text,
+  delegation, brief text, reply budget,
 }
 @design/task-core.sigil from TaskCore import {
     task, task id, brief, child run, result, transcript, launch spec, attach command,
@@ -82,7 +82,8 @@ component Cli {
     its own use by init.
 
     A delegation from the Cli must carry no parent session id, because a command
-    line has no conversation.
+    line has no conversation, and no reply budget, because the Cli prints the
+    result whole to a terminal that has no inline limit.
 
     The attach command must be refused while the task status of the task is
     running, because the start-up sweep has already marked the task of a dead

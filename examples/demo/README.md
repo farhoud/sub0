@@ -79,5 +79,6 @@ The same skill works in pi without Claude:
   demo; your login is unaffected.
 - The endpoint serves one request at a time (`parallel: 1` in
   `.agents/subzero.yaml`), so the reviewers run one after another.
-- Keep reviewer output small: the model server caps one reply at 4096 tokens,
-  and subzero passes at most about 2000 tokens of a reply back to Claude.
+- Keep reviewer output small: the model server caps one reply at 4096 tokens.
+  subzero passes a reply back to Claude whole, never cut, and tells the child
+  to keep it under 48,000 characters.

@@ -152,12 +152,13 @@ output, tool arguments other than a path, the stderr tail or skill content.
 
 - The model sees `content`. `structuredContent` is supported, but always fill `content` too.
 - Result over 50k characters → Claude saves it to a file. Over 10k tokens → a warning. The cap is 25k.
-  subzero's own budget (default 2k tokens) stays well below all of these.
+  subzero never cuts a result: it tells the child to keep its reply under 48,000 characters, and an
+  `await` reply that would pass 50k gives the later results as pointers to `tasks(<id>)` instead.
 - Shape (there is no changed-file list; the user reviews the tree with git):
 
 ```
 task: sz-7f3k2q · turn 2 · semanticizer · status: completed
-summary: <≤ budget, from pi get_last_assistant_text, cut at a line boundary with a marker>
+summary: <the whole of pi get_last_assistant_text, never cut>
 usage: { tokens, cost, model, duration }
 next: continue(task) · ask(task, question) · tasks(task, detail: report)
 ```
@@ -339,7 +340,7 @@ holds a per-task file lock: `continue`, `attach` and `ask` wait for or refuse a 
 | Cost in the parent | Without subzero | With subzero |
 |---|---|---|
 | Always present | Skill listing entry (~50–150 tokens per skill) | Proxy listing entry (same) + server instructions (~200 tokens) + `delegate` schema (~150 tokens) |
-| When used | Full skill body (often 1–5k) + every file and tool output the work produces | Proxy body (~80) + brief written by Claude (~200–600) + result (≤2k) |
+| When used | Full skill body (often 1–5k) + every file and tool output the work produces | Proxy body (~80) + brief written by Claude (~200–600) + result (the child's final answer, sized by the reply budget in its brief) |
 | After compaction | Skill body re-attached (≤5k per skill, 25k total) | Proxy body only |
 
 Break-even: subzero is worth it once **skill body + work output > roughly 1.5k tokens**. Below that,
@@ -367,7 +368,7 @@ option), instead of wrapping everything.
 | R11 | Unclear whether `grep`/`find` tools fetch `rg`/`fd` binaries over the network under `--offline` ⚠ | Check in the spike; fall back to `--tools read,ls,bash` |
 | R12 | A skill bundle may not fit a local model's context. The interpreter child loads sigil-understand (whose language reference alone is ~57 KB) and sigil-egglog, plus the prepared request. Compaction mid-reading could drop the rules it is following. | Measure peak child context with `get_session_stats` in the spike. Record compactions as an event. If it does not fit, that is a finding about the bundle, not a subzero bug. |
 | R13 | Routing: a skill asks for a "fresh sub-agent" and the host picks its own mechanism instead of `delegate` | Routing lines in the native subagent's prompt (§6.1). Inside a Claude subagent there is no Agent tool, so `delegate` is the only option (⚠ re-check). In the main conversation, a `PreToolUse` hook on the Agent tool is the fallback. |
-| R14 | A child's real output is bigger than the result budget (e.g. sigil-write's review report, once sigil-write is delegated to) | `result.report_file` (v0.1): the child writes the full output to a file in the task record; the result carries a summary and the path. Not needed in the spike: the interpreter's output is its answer file. |
+| R14 | A child's real output is bigger than the reply budget (e.g. sigil-write's review report, once sigil-write is delegated to) | `result.report_file` (v0.1): the child writes the full output to a file in the task record; the result carries a summary and the path. Not needed in the spike: the interpreter's output is its answer file. |
 
 ## 6. Spike plan (about 1 week)
 
