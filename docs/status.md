@@ -31,7 +31,7 @@ do, what it deferred, and how it was checked.
 | Spike experiment (A/B on sigil-evaluate) | Partly run. Planned passes are missing and no go/no-go decision has been written. |
 | v0.2 and later (task model, config layering, other hosts) | Not started. |
 
-Tests: 23 files, 367 tests pass (`npm test`), with typecheck and build clean.
+Tests: 24 files, 395 tests pass (`npm test`), with typecheck and build clean.
 
 ## What is implemented
 
@@ -70,7 +70,8 @@ The distribution work added:
 - the `/subzero:init` and `/subzero:tasks` commands;
 - the release zip and local marketplace build (`npm run release:build`);
 - the marketplace generator and the tag-triggered release workflow;
-- the [README](../README.md) and [releasing.md](releasing.md).
+- the [README](../README.md), the [configuration reference](configuration.md)
+  and [releasing.md](releasing.md).
 
 ## What is left
 

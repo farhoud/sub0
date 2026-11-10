@@ -96,6 +96,10 @@ Start a new Claude Code session in the project, so the session-start hook reads
 the file. Add `small` or `large` the same way to route those tiers too; read
 [what a `large` tier changes](#what-configuring-a-large-tier-changes) first.
 
+Every key of the file, how a request picks its model, the checks the file must
+pass and what is not supported yet are in the
+[configuration reference](docs/configuration.md).
+
 ## Confirm it works
 
 Ask Claude for a mid-tier subagent:
@@ -191,6 +195,7 @@ that named the agent ran it, with or without a skill, and the child's reply
 followed the skill's format. The agent file is read again on each delegation,
 so a new agent works without restarting Claude Code.
 
+All agent keys are in the [configuration reference](docs/configuration.md#agents-what-you-can-ask-for-by-name).
 Limits of named agents in this preview:
 
 - **Claude does not see your agents.** Their names and descriptions are not
@@ -297,6 +302,7 @@ the new one.
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE). How the routing works is in
+Apache-2.0, see [LICENSE](LICENSE). The agent file is documented in
+[docs/configuration.md](docs/configuration.md). How the routing works is in
 [docs/design.md](docs/design.md), section 5.4. Maintainers: see
 [docs/releasing.md](docs/releasing.md).
