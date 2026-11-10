@@ -154,6 +154,70 @@ The rules behind it:
   endpoint's `parallel` limit; `/subzero:tasks` shows each as queued or
   running.
 
+### Named agents
+
+Besides `general`, you can define your own agents in `.agents/subzero.yaml`,
+with or without skills. An agent with a skill runs a pi child that has only that
+skill loaded: the skill's instructions and files stay in the child, and Claude
+gets only the reply.
+
+```yaml
+skills:                      # skill name -> folder, relative to .agents/
+  file-facts: ../subzero-skills/file-facts
+
+agents:
+  file-facts:
+    description: Reports three facts about one source file.
+    skills: [file-facts]     # names from the skills map; leave out for no skills
+    tools: [read, grep, find, ls]
+    timeout: 120             # seconds, required
+    tier: medium             # optional; without it the agent runs on default
+```
+
+A skill folder holds a `SKILL.md`, as for any Agent Skill. Keep it out of
+`.claude/skills/`, or Claude loads the skill itself and nothing is delegated.
+Keep it out of `.agents/subzero/` too, because that folder ignores itself in git.
+A folder of its own, such as `subzero-skills/`, works.
+
+Ask for the agent by name:
+
+```text
+Use the file-facts agent on app.py and show me its reply.
+```
+
+Claude calls `delegate` with `agent: "file-facts"`, and `/subzero:tasks` shows the
+task as `file-facts`. In headless runs with Claude Code 2.1.318, every request
+that named the agent ran it, with or without a skill, and the child's reply
+followed the skill's format. The agent file is read again on each delegation,
+so a new agent works without restarting Claude Code.
+
+Limits of named agents in this preview:
+
+- **Claude does not see your agents.** Their names and descriptions are not
+  shown to Claude, so only a request that names the agent runs it. A request
+  that fits the description but does not name the agent goes to `general` (or
+  stays on Claude), even when the description matches it word for word. Listing
+  agents for Claude is planned for v0.2.
+- **A misspelled name runs `fallback`.** The reply starts with a notice that the
+  agent is not configured and lists the configured agents. Without a `fallback`
+  entry it is an error and no task is made.
+- **A skill missing from the `skills` map fails the whole file to load**, so no
+  delegation runs until it is fixed. A skill folder that does not exist fails
+  the task as `skill_mismatch` before the child starts work.
+- **Skills are local folders only.** Git sources, a lock file, skills that ship
+  their own agent definition, and per-user or local override files are planned
+  for v0.2.
+- **The child copies the skill when it starts.** A task keeps the version of the
+  skill it started with; an edit applies to the next task.
+- **`tools` is the only restriction on a child.** pi has no folder sandbox, so a
+  child with `read` can read any file your user can, and one with `bash`,
+  `edit` or `write` can change anything. There is no permission prompt.
+- **Each task is one turn.** You cannot continue a named agent's task or ask it
+  a follow-up question yet; a new request starts a new child. `continue` and
+  `ask` are planned for v0.2.
+- **The child sees only the brief.** It does not see your conversation, so the
+  request must say which files and what answer you want.
+
 ### What configuring a large tier changes
 
 Adding `large` to `models.tiers` makes subzero take every generic subagent that
