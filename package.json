@@ -1,6 +1,6 @@
 {
   "name": "subzero",
-  "version": "0.0.1-spike",
+  "version": "0.1.0-preview.1",
   "private": true,
   "description": "Delegate a skill's work from Claude Code to an isolated pi child.",
   "type": "module",
@@ -25,5 +25,10 @@
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qoherent/sub0.git"
   }
 }
