@@ -105,6 +105,8 @@ Plan: [docs/plans/2026-11-06-0953-feat-tiered-subagent-routing-plan.md](plans/20
 | Six-reviewer batch against `parallel: 1` | Pass on queueing | Six parallel `sonnet` spawns were denied by six concurrent hook processes, and `delegate` returned one `running` and five `queued` at places 1 to 5. One `await` collected all six. |
 | `await` result share with realistic sizes | Finding | Each child returned about 3 KB (30 lines of 90+ characters). `await` returned 11,998 characters with a cut marker on all six sections, each cut to about 2,000 characters, as KTD11 specifies. Claude followed the pointer and read a full result with `tasks`. A CE batch of six or more reviewers whose compact returns exceed about 2,000 characters would be cut the same way, so the code review's adversarial finding on this (a share fixed by task count, not by size) is now measured, not just argued. |
 
+**After decision 24 (whole results).** The same six-batch probe, rerun on the build that never cuts a result: the one `await` reply was 33,299 characters and showed all six results whole, 30 lines each, with no cut marker and no deferred task. Each brief ended with the reply-size section (`Keep your final reply under 48,000 characters`).
+
 **Not covered**
 - A CE run that selects six reviewers; the batch probe used plain generic spawns.
 - Concurrent hook processes were exercised live by the four-spawn and six-spawn probes; their unit test remains.
