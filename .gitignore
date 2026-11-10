@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-release/
 # sigil generated state (sigil's own convention: only .sigil/config.json is tracked)
 .sigil/local.json
 .sigil/trees/

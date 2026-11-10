@@ -12,6 +12,7 @@
   },
   "scripts": {
     "build": "tsc --noEmit && node build.mjs",
+    "release:build": "npm run build && node scripts/build-plugin.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
