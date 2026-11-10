@@ -86,12 +86,21 @@ Plan: [docs/plans/2026-11-06-0953-feat-tiered-subagent-routing-plan.md](plans/20
 
 **Probe of the PreToolUse hook.** Because the review never needed a denial, a second headless run asked Claude for one generic Agent spawn with `model: "sonnet"` and the description `probe hook`. The hook denied it with the instruction to call `delegate` with `tier: "medium"`, the prompt unchanged as `brief` and `wait: false`; Claude did so, and task `sz-wksvtm` (`general:medium`) completed in 6 seconds with the reply `ok`. This confirms in Claude Code 2.1.318 that the hook fires on the Agent tool, that the readiness marker and the ancestor-process check work in a real process tree, and that a denial reaches Claude as a routing instruction. The hook input's `description` field (the pass-back marker) was not exercised, because no pass-back was needed.
 
-**Not covered by this run**
-- AE4 (queued tasks): only one reviewer was routed, so no task waited for the endpoint. The queued and started wording is covered by the unit tests, not by CE.
-- AE12 (pass-back), AE8 (alias switch after a deny) and the `fork` and `isolation` field names were not run live.
-- The three further scenarios the plan lists were not run: `/compact` mid-review, the subzero server command broken, and a tier whose host has no driver.
+**Further probes (2026-11-10, same demo copy, same plugin build).** Each is a short headless run (`claude -p`) that forces one scenario the review did not reach.
+
+| Scenario | Result | Evidence |
+|---|---|---|
+| AE4, a batch larger than the endpoint | Pass | Four parallel generic `sonnet` Agent spawns were all denied, and Claude sent them as four `delegate(tier: "medium", wait: false)` calls. The replies were `running, started <iso>` for the first and `queued, not launched yet ... (place n in this session's queue)` for the rest. One `await` collected all four, completed. Two queued tasks both showed place 1 because the first task finished (about a second) between dispatches. |
+| AE8, alias switch after a deny | Pass | The same prompt retried with `haiku` and then with no model was denied both times, with the same instruction (`tier: "medium"`). |
+| AE12 and a tier on a host with no driver | Pass | A `small` tier on host `claude` was added to the demo copy (and removed afterwards). The hook denied a `haiku` spawn toward `small`; `delegate` returned a tool error that names the tier, the host, the supported hosts (`pi`) and the configured tiers, and made no task; Claude passed the prompt back with a `passback` description and the hook let it through. This also shows the hook receives the Agent `description` field, so the plan's stop condition does not apply. The probe's first description already began with `passback`, and the hook still denied it, which matches the rule that a pass-back of a never-denied prompt is routed like any other spawn. |
+| Subzero server command broken | Pass | In a copy of the plugin whose `.mcp.json` points at a missing file, the MCP server reported `failed`, a `sonnet` spawn was allowed, ran on Claude and replied. The SessionStart text still said routing was on, because that hook cannot know the server will fail; nothing was denied, so nothing was stranded. |
+| `/compact` | Pass | A resumed session was compacted (34,914 to 4,802 tokens; SessionStart fired around it), and the next generic spawn was still denied and routed to `general:medium`. |
+
+**Not covered**
+- The `fork` and `isolation` field names the hook assumes (`subagent_type: "fork"`, a non-empty `isolation` string) were not seen in a live hook input, and neither was a worktree-isolated CE reviewer. A CE run that selects the testing reviewer with mutation testing would show it.
+- CE chose four reviewers for a 75-line diff, so a six-reviewer CE batch against `parallel: 1` was not seen; the queue was exercised by the four-spawn probe instead.
+- The deny memory's seven-day sweep and concurrent hook processes were exercised by unit tests only.
 - CE tried to start its cross-model peer review (a Codex command). The non-interactive session had no permission to run it, so it was denied, nothing was sent, and the adversarial lens ran in-process.
-- CE chose four reviewers for a 75-line diff, so the run shows routing for one mid-tier reviewer, not a six-reviewer batch.
 
 ## Decision
 
