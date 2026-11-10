@@ -1,16 +1,27 @@
 # Releasing the subzero plugin
 
-For the maintainers (Qoherent). Users install a built, plugin-only zip that a
-tagged release attaches, through a marketplace named `qoherent` whose catalog is
-`.claude-plugin/marketplace.json` in this repository. Three parts follow: testing
-locally before the repository is at `qoherent/sub0`, cutting a release, and what to
-do after the transfer.
+For the maintainers (Qoherent). Two routes put the plugin in front of users, both
+through a marketplace named `qoherent`:
+
+- **Now, from git:** the `plugin` branch of this repository holds the built plugin
+  and its own marketplace file. Users add it with
+  `claude plugin marketplace add farhoud/subzero@plugin`. You publish it by hand,
+  as the second part below describes.
+- **Later, from releases:** a tagged release attaches a built, plugin-only zip, and
+  the catalog is `.claude-plugin/marketplace.json` on the default branch. The
+  workflow publishes it.
+
+Four parts follow: testing locally, publishing the plugin branch, cutting a
+release, and what to do after the transfer to `qoherent/sub0`.
 
 How the pieces fit:
 
 - `scripts/build-plugin.mjs` copies an allowlist of files into
   `dist-release/subzero-<version>/`, zips it as `subzero-<version>.zip`, writes the
   zip's SHA-256 beside it, and builds `dist-release/local-marketplace/`.
+- `scripts/publish-plugin-branch.mjs` builds the same staged plugin, adds a
+  `.claude-plugin/marketplace.json` that lists it at the branch root, and commits
+  the result to the `plugin` branch. It pushes only with `--push`.
 - `scripts/update-marketplace.mjs` writes `.claude-plugin/marketplace.json` for one
   release: an `archive` entry with the release asset URL and the `sha256`, and no
   `version`. The version lives only in the manifest inside the zip.
@@ -68,6 +79,53 @@ Nothing here needs the final URLs. You need Node 22, `zip` and Claude Code.
    This also uninstalls `subzero@qoherent`. The user data of a marketplace install
    lives in its own folder (`subzero-qoherent`), apart from the one a `--plugin-dir`
    run uses.
+
+## Publish the plugin branch
+
+Claude Code cannot run the plugin from `main`, because `dist/` is not committed.
+The `plugin` branch holds what it needs: the staged plugin (the same allowlist as
+the release zip) and a marketplace file with one entry, `subzero`, whose source is
+the branch root and which has no `version`. The version comes from the manifest in
+the branch.
+
+1. Make sure the version is set as in "Cut a release", and commit your changes. The
+   script refuses to push from a working tree with uncommitted changes, so the
+   branch always matches a commit.
+2. Prepare the commit without publishing anything:
+
+   ```sh
+   npm run release:branch
+   ```
+
+   It builds, then prints the folder that holds the prepared commit. Inspect it,
+   and optionally check it in a scratch profile:
+
+   ```sh
+   claude plugin validate <folder>
+   CLAUDE_CONFIG_DIR=$(mktemp -d) claude plugin marketplace add <folder>
+   ```
+
+3. Publish it:
+
+   ```sh
+   npm run release:branch -- --push
+   ```
+
+   The script fetches the `plugin` branch from `origin` (or `--remote <url>`), puts
+   one commit on top that replaces every file, and pushes without force. A run that
+   changes nothing adds no commit. It refuses to use `main` or `master` as the
+   branch name.
+
+4. Check from a clean profile:
+
+   ```sh
+   claude plugin marketplace add farhoud/subzero@plugin
+   claude plugin install subzero@qoherent
+   ```
+
+Users receive a new version only when its number changes in the branch's
+`.claude-plugin/plugin.json`. A new commit with the same version is not picked up.
+Never edit the branch by hand: the next publish replaces every file.
 
 ## Cut a release
 
@@ -127,7 +185,12 @@ catalog, so nobody can install yet.
   release asset.
 - Confirm `package.json` `repository` names `qoherent/sub0`, and search the docs
   and the demo for the old owner and name, `farhoud/subzero`, and for the folder
-  name `spike-with-sigil`. Change what you find.
+  name `spike-with-sigil`. Change what you find, including the install commands
+  in `README.md`, which name the `plugin` branch of the old repository until the
+  first release exists. GitHub redirects the old name after the transfer, so those
+  commands keep working until you change them. Users who installed from the branch
+  must run `claude plugin marketplace remove qoherent` before they add the
+  release marketplace, because both use the name `qoherent`.
 - Confirm the marketplace name `qoherent` is free, that no local test copy is still
   added (`claude plugin marketplace remove qoherent`), and run
   `claude plugin validate .`.

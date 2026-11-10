@@ -22,6 +22,11 @@ const pkg = JSON.parse(read('package.json')) as { version: string; scripts: Reco
 
 const SECTION_TITLE = 'After the transfer to qoherent/sub0';
 
+// Until the first release the plugin installs from the `plugin` branch of the repository where it
+// lives now. The README names that repository only in its install commands; the after-the-transfer
+// checklist says to change them.
+const INSTALL_REPO = 'farhoud/subzero';
+
 /** The text of one `## ` section, up to the next `## ` heading or the end. */
 function sectionRaw(text: string, title: string): string {
   const lines = text.split('\n');
@@ -45,7 +50,9 @@ describe('README.md', () => {
   });
 
   it('has the two install commands, the init command and the commands it points at', () => {
-    expect(README).toContain('/plugin marketplace add qoherent/sub0');
+    expect(README).toContain(`claude plugin marketplace add ${INSTALL_REPO}@plugin`);
+    expect(README).toContain('claude plugin install subzero@qoherent');
+    expect(README).toContain(`/plugin marketplace add ${INSTALL_REPO}@plugin`);
     expect(README).toContain('/plugin install subzero@qoherent');
     expect(README).toMatch(/\/subzero:init <model>/);
     expect(README).toContain('/subzero:tasks');
@@ -93,8 +100,8 @@ describe('README.md', () => {
     const order = [
       /^## .*(preview|limits)/im,
       /^## Prerequisites/m,
-      /\/plugin marketplace add qoherent\/sub0/,
-      /\/plugin install subzero@qoherent/,
+      /claude plugin marketplace add farhoud\/subzero@plugin/,
+      /claude plugin install subzero@qoherent/,
       /\/subzero:init <model>/,
       /^## .*(Confirm|Test)/im,
       /^## Update/m,
@@ -103,6 +110,19 @@ describe('README.md', () => {
     const positions = order.map((pattern) => README_RAW.search(pattern));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it('installs from the plugin branch and says what changes when releases are published', () => {
+    const install = section(README_RAW, 'Install');
+    expect(install).toMatch(/no published release yet/i);
+    expect(install).toMatch(/`plugin` branch/);
+    expect(install).toMatch(/nothing to clone or build/i);
+    expect(install).toMatch(/claude plugin marketplace remove qoherent/);
+    expect(install).toMatch(/\/reload-plugins|new session/);
+  });
+
+  it('says an update needs a new version number on the plugin branch', () => {
+    expect(section(README_RAW, 'Update')).toMatch(/plugin. branch gets a new version\s+number/i);
   });
 
   it('says how to update with the commands the Claude Code documentation gives', () => {
@@ -125,7 +145,20 @@ describe('docs/releasing.md', () => {
     expect(RELEASING_RAW).not.toBe('');
   });
 
-  it('has the three parts: local testing, cutting a release, and the transfer checklist', () => {
+  it('has a section on publishing the plugin branch, with the script and its safeguards', () => {
+    const publish = section(RELEASING_RAW, 'Publish the plugin branch');
+    expect(Object.keys(pkg.scripts)).toContain('release:branch');
+    expect(existsSync(path.join(REPO, 'scripts', 'publish-plugin-branch.mjs'))).toBe(true);
+    expect(publish).toContain('npm run release:branch');
+    expect(publish).toContain('npm run release:branch -- --push');
+    expect(publish).toMatch(/uncommitted changes/);
+    expect(publish).toMatch(/without force/);
+    expect(publish).toMatch(/main. or .master/);
+    expect(publish).toMatch(/only when its number changes|version.*changes/i);
+    expect(publish).toContain(`claude plugin marketplace add ${INSTALL_REPO}@plugin`);
+  });
+
+  it('has the parts: local testing, publishing the branch, cutting a release, and the transfer checklist', () => {
     expect(RELEASING_RAW).toMatch(/^## Test locally/m);
     expect(RELEASING_RAW).toMatch(/^## Cut a release/m);
     expect(transfer).not.toBe('');
@@ -183,11 +216,15 @@ describe('both pages', () => {
     // The search item names the old owner and name so the maintainer knows what to look for.
     expect(flat(search)).toContain('farhoud/subzero');
 
-    const outside = RELEASING_RAW.replace(search, '');
+    // The install commands name the repository as it is today, with the branch: allowed in both pages.
+    const withoutInstall = (text: string) => text.split(`${INSTALL_REPO}@plugin`).join('');
+    const outside = withoutInstall(RELEASING_RAW.replace(search, ''));
+    const readmeWithoutInstall = withoutInstall(README_RAW);
     for (const old of OLD_NAMES) {
-      expect(README_RAW.toLowerCase()).not.toContain(old);
+      expect(readmeWithoutInstall.toLowerCase()).not.toContain(old);
       expect(outside.toLowerCase()).not.toContain(old);
     }
+    expect(flat(search)).toMatch(/install commands in `README\.md`/);
   });
 
   it('point only at files that exist in the repository', () => {
