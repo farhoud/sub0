@@ -96,10 +96,20 @@ Plan: [docs/plans/2026-11-06-0953-feat-tiered-subagent-routing-plan.md](plans/20
 | Subzero server command broken | Pass | In a copy of the plugin whose `.mcp.json` points at a missing file, the MCP server reported `failed`, a `sonnet` spawn was allowed, ran on Claude and replied. The SessionStart text still said routing was on, because that hook cannot know the server will fail; nothing was denied, so nothing was stranded. |
 | `/compact` | Pass | A resumed session was compacted (34,914 to 4,802 tokens; SessionStart fired around it), and the next generic spawn was still denied and routed to `general:medium`. |
 
+**Last three gaps (2026-11-10).** A copy of the plugin whose PreToolUse command also logged its stdin captured the real hook input; the sweep and the six-batch probes ran against the real plugin data folder.
+
+| Scenario | Result | Evidence |
+|---|---|---|
+| Real hook input, `isolation` and `fork` | Pass | The hook input carries `session_id`, `cwd`, `permission_mode`, `hook_event_name`, `tool_name: "Agent"` and `tool_input` with `description`, `prompt`, `model`, `run_in_background` and, when asked, `isolation: "worktree"` or `subagent_type: "fork"`, exactly the shapes the hook assumes. A worktree-isolated spawn and a fork spawn were both allowed and ran on Claude; the next generic `sonnet` spawn in the same session was denied and ran as `general:medium`. |
+| Deny-memory sweep, live | Pass | Before the run, the session's own deny folder and another session's folder were both aged to 9 days. After one denial the other session's folder was gone, and the session's own folder was kept, now holding its new entry. |
+| Six-reviewer batch against `parallel: 1` | Pass on queueing | Six parallel `sonnet` spawns were denied by six concurrent hook processes, and `delegate` returned one `running` and five `queued` at places 1 to 5. One `await` collected all six. |
+| `await` result share with realistic sizes | Finding | Each child returned about 3 KB (30 lines of 90+ characters). `await` returned 11,998 characters with a cut marker on all six sections, each cut to about 2,000 characters, as KTD11 specifies. Claude followed the pointer and read a full result with `tasks`. A CE batch of six or more reviewers whose compact returns exceed about 2,000 characters would be cut the same way, so the code review's adversarial finding on this (a share fixed by task count, not by size) is now measured, not just argued. |
+
 **Not covered**
-- The `fork` and `isolation` field names the hook assumes (`subagent_type: "fork"`, a non-empty `isolation` string) were not seen in a live hook input, and neither was a worktree-isolated CE reviewer. A CE run that selects the testing reviewer with mutation testing would show it.
-- CE chose four reviewers for a 75-line diff, so a six-reviewer CE batch against `parallel: 1` was not seen; the queue was exercised by the four-spawn probe instead.
-- The deny memory's seven-day sweep and concurrent hook processes were exercised by unit tests only.
+- A CE run that selects six reviewers; the batch probe used plain generic spawns.
+- Concurrent hook processes were exercised live by the four-spawn and six-spawn probes; their unit test remains.
+- A worktree-isolated CE reviewer (mutation testing) was not run; the isolated spawn was a plain probe.
+- The hook input carries `permission_mode`, which the hook does not read. A generic spawn made in plan mode is therefore still redirected to a child that has bash, write and edit.
 - CE tried to start its cross-model peer review (a Codex command). The non-interactive session had no permission to run it, so it was denied, nothing was sent, and the adversarial lens ran in-process.
 
 ## Decision
