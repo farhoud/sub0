@@ -302,6 +302,26 @@ Lookups the index supports:
 The start-up sweep reads the index at every start-up of a front end and again before a collect, a cancel
 and a listing. A listing from the `tasks` tool holds at most 50 tasks, running ones first.
 
+**Why child sessions live in `.agents/subzero/sessions/` and not in pi's own folder.** The task record
+already maps a task to its session file (read back from pi's `get_state.sessionFile`), so a mapping alone
+would find the session anywhere. The separate folder (`--session-dir`, required by `design/pi-driver.sigil`)
+is chosen for five reasons:
+1. **Isolation (P21).** A child ran with only its declared skills and no extensions or context files. In
+   pi's own folder it would show in `/resume`, and resuming it there loads the user's full setup into it.
+2. **Clutter (P22).** A review can start 5–10 children; they would mix with the user's own sessions.
+3. **Cleanup.** `prune` (v0.2) deletes a task's record and its session together, inside subzero's own store,
+   never inside `~/.pi/agent/sessions`.
+4. **Secrets.** Sessions hold tool output. The store folder is owner-only (0700) and ignores itself in git;
+   subzero does not control pi's folder.
+5. **Session id clashes.** The pi session id is the task id. An id that matches a session of another project
+   makes pi ask on stdin, which would break the RPC stream (target-claude-pi.md §3.4; seen on an earlier pi).
+
+The sessions are not hidden. `pi --session-dir .agents/subzero/sessions --resume` (or `--session <task id>`,
+or `PI_CODING_AGENT_SESSION_DIR`) opens them, and `pi --export <file> out.html` writes a read-only page.
+Opened that way, a session runs under the user's own skills, extensions and AGENTS.md, and pi does not lock
+session files, so typing while the task runs would interleave writes. `subzero show` and `subzero attach`
+reuse the child's launch spec, and `attach` is refused while a run is live. The README tells users the same.
+
 
 
 ## 4. Configuration (`.agents/subzero.yaml`)

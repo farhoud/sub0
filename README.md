@@ -111,6 +111,36 @@ To see routing without asking for it, install the compound-engineering plugin an
 run one of its reviews, such as `/ce-code-review`, on a project with changes.
 Its mid-tier subagents appear as subzero tasks in `/subzero:tasks`.
 
+## Look at what a child did
+
+Each child's pi session is saved in the project, under
+`.agents/subzero/sessions/`, in a file named after its task id (for example
+`2026-11-05T10-07-23-137Z_sz-lqnjho.jsonl`). The folder keeps the children out
+of your own pi history, and only you can read it. Get the task id from
+`/subzero:tasks`, then, from the project folder:
+
+```sh
+pi --export .agents/subzero/sessions/<file>.jsonl out.html    # the whole session as a page, read-only
+pi --session-dir .agents/subzero/sessions --resume            # pick a child session in pi
+pi --session-dir .agents/subzero/sessions --session <task id> # open one child session in pi
+```
+
+Reading is safe. Before you type into a child session opened this way, know two
+things:
+
+- Plain `pi` loads your own skills, extensions and AGENTS.md, which the child ran
+  without. Typing continues the conversation under a different setup than the
+  child had.
+- pi does not lock session files. Do not type while the task is still running
+  (`/subzero:tasks` shows it as running): you and the child would write to the
+  same file.
+
+The subzero command line does the same jobs with the child's own launch flags:
+`subzero show <task id>` exports the page, and `subzero attach <task id>` opens
+the child in pi and refuses while it is running. In this preview neither is a
+slash command; with a built checkout of this repository, run
+`node <checkout>/dist/cli.js show <task id>` (or `attach`) in the project folder.
+
 ## Update
 
 A release reaches you only when you update. Changes on the main branch never do.
