@@ -133,13 +133,20 @@ export interface StarterTools {
 }
 
 /**
+ * A check that the host of a child driver can run: undefined when it passes, and
+ * otherwise a message that says what is missing and what to do.
+ */
+export type PrerequisitesCheck = () => string | undefined;
+
+/**
  * A child driver: its child port, and whatever else it offers. A caller asks for
- * the attach command, session export and starter tools through the driver of the
- * host, and never assumes a driver offers them.
+ * the attach command, session export, starter tools and prerequisites check
+ * through the driver of the host, and never assumes a driver offers them.
  */
 export interface ChildDriver {
   port: ChildPort;
   attachCommand?: AttachCommand;
   sessionExport?: SessionExport;
   starterTools?: () => StarterTools;
+  prerequisites?: PrerequisitesCheck;
 }

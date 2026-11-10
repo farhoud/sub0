@@ -1,7 +1,7 @@
 @design/task-core.sigil from TaskCore import {
   task id, brief, child run, failure kind, domain event, child port, session usage,
     launch spec, attach command, child session, session export, child driver,
-    starter tools,
+    starter tools, prerequisites check,
 }
 @design/agent-config.sigil from AgentConfig import {
   agent definition, skill folder, project root, timeout, thinking level,
@@ -174,11 +174,17 @@ component PiDriver {
     Export the child session of a task as HTML with pi --export, as the
     session export of the child driver for the host pi.
 
+    Offer a prerequisites check that runs the configured pi command with
+    --version, passes when it exits zero, and otherwise returns a message that
+    names pi, says whether it was not found or did not run, and says to install
+    pi and run subzero init again.
+
     Register with the driver registry of Kernel as the child driver for the host pi
     when an entry point of a process registers it, and offer the attach command,
-    the session export and the starter tools through it. The starter tools are the
-    tool list read, bash, edit, write, grep, find and ls for a general agent, and
-    the tool list read, grep, find and ls for a fallback agent.
+    the session export, the starter tools and the prerequisites check through it.
+    The starter tools are the tool list read, bash, edit, write, grep, find and
+    ls for a general agent, and the tool list read, grep, find and ls for a
+    fallback agent.
   }
 
   decisions {

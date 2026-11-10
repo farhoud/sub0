@@ -119,6 +119,12 @@ async function init(service: DelegationService, args: string[], io: CliIo, optio
     io.err(`subzero: ${which} when init has these supported hosts to choose from: ${supported.join(', ')}`);
     return 1;
   }
+  // A missing prerequisite stops init before anything is written.
+  const problem = options.kernel.prerequisites(host)?.();
+  if (problem !== undefined) {
+    io.err(`subzero: ${problem}`);
+    return 1;
+  }
   const tools = options.kernel.starterTools(host);
   if (tools === undefined) {
     io.err(`subzero: the child driver of the host "${host}" offers no starter tools, so init cannot write the agent entries`);

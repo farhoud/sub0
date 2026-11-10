@@ -4,7 +4,7 @@
 // declared skills, runs one brief to agent_settled, and stops it cleanly in every
 // exit case. The driver writes no task record: it hands the launch spec to its
 // caller in the run started event.
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -101,6 +101,33 @@ export class PiDriver implements ChildDriver {
     general: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'],
     fallback: ['read', 'grep', 'find', 'ls'],
   });
+
+  /**
+   * Runs the configured pi command with --version. Undefined when it answers; a
+   * message otherwise that names pi, says whether it was not found or did not run,
+   * and says to install it and run subzero init again.
+   */
+  readonly prerequisites = (): string | undefined => {
+    const [program, ...rest] = this.piCommand;
+    const result = spawnSync(program!, [...rest, '--version'], {
+      timeout: 10_000,
+      env: { ...(this.options.env ?? process.env), ...CHILD_ENV },
+      stdio: 'ignore',
+    });
+    const next = 'To continue, install pi and run `subzero init` again.';
+    if (result.error !== undefined) {
+      const notFound = (result.error as NodeJS.ErrnoException).code === 'ENOENT';
+      return notFound
+        ? `pi was not found (${program}). ${next}`
+        : `pi did not run (${program}: ${result.error.message}). ${next}`;
+    }
+    if (result.status !== 0) {
+      return `pi did not run (${[program, ...rest, '--version'].join(' ')} ${
+        result.status === null ? `ended by ${result.signal}` : `exited with code ${result.status}`
+      }). ${next}`;
+    }
+    return undefined;
+  };
 
   get piCommand(): string[] {
     return this.options.piCommand ?? ['pi'];

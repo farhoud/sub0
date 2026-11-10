@@ -343,4 +343,24 @@ describe('PiDriver', () => {
     expect(driver.attachCommand({ command: ['pi', '--mode', 'rpc', '--session-id', 'sz-abcdef'], cwd: '/p', envNames: [], version: '1', skillFolders: [], thinkingLevel: 'low' })).toEqual(['pi', '--session-id', 'sz-abcdef']);
     expect(typeof driver.sessionExport).toBe('function');
   });
+
+  describe('prerequisites', () => {
+    it('passes when the pi command answers --version', () => {
+      expect(new PiDriver({ piCommand: FAKE_PI_COMMAND }).prerequisites()).toBeUndefined();
+    });
+
+    it('names pi, says it was not found and to install it and run subzero init again, when it cannot start', () => {
+      const message = new PiDriver({ piCommand: [path.join(tempDir(), 'no-such-pi')] }).prerequisites();
+      expect(message).toMatch(/pi was not found/);
+      expect(message).toMatch(/install pi and run `subzero init` again/);
+    });
+
+    it('says pi did not run, and to install it and run subzero init again, when it exits non-zero', () => {
+      const broken = path.join(tempDir(), 'broken-pi.mjs');
+      writeFileSync(broken, 'process.exit(3);\n');
+      const message = new PiDriver({ piCommand: [process.execPath, broken] }).prerequisites();
+      expect(message).toMatch(/pi did not run/);
+      expect(message).toMatch(/install pi and run `subzero init` again/);
+    });
+  });
 });

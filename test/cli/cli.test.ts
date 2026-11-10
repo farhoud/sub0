@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/cli.js';
@@ -298,6 +298,80 @@ describe('Cli', () => {
       expect(await run('init', 'm/x', '--host', 'codex')).toBe(0);
       expect(getAgent(root, 'general')).toMatchObject({ host: 'codex', tools: ['g'] });
       expect(getAgent(root, 'fallback').tools).toEqual(['f']);
+    });
+
+    describe('the prerequisites check (AE2)', () => {
+      const withPi = (root: string, piCommand: string[]) => {
+        const out: string[] = [];
+        const err: string[] = [];
+        const run = (...argv: string[]) =>
+          runCli(argv, { out: (t) => out.push(t), err: (t) => err.push(t) }, {
+            env: { SUBZERO_PROJECT_DIR: root },
+            warn: () => {},
+            interactive: false,
+            kernel: piKernel({ piCommand, piAgentDir: tempDir() }).kernel,
+          });
+        return { run, out, err };
+      };
+
+      it('says pi is missing and what to do, exits non-zero and writes nothing, when the pi command does not exist', async () => {
+        const root = tempDir();
+        const { run, out, err } = withPi(root, [path.join(tempDir(), 'no-such-pi')]);
+        expect(await run('init', 'm/x')).toBe(1);
+        expect(err.join('\n')).toMatch(/pi.*not found.*install pi and run `subzero init` again/s);
+        expect(out).toEqual([]);
+        expect(existsSync(agentFile(root))).toBe(false);
+      });
+
+      it('fails the same way when the pi command exits non-zero, leaving an existing agent file as it was', async () => {
+        const text = `agents:\n  general:\n    tools: [read]\n    timeout: 7\n`;
+        const root = makeProject(text);
+        const broken = path.join(tempDir(), 'broken-pi.mjs');
+        writeFileSync(broken, 'process.exit(3);\n');
+        const { run, err } = withPi(root, [process.execPath, broken]);
+        expect(await run('init', 'm/x')).toBe(1);
+        expect(err.join('\n')).toMatch(/pi.*did not run.*install pi and run `subzero init` again/s);
+        expect(readFileSync(agentFile(root), 'utf8')).toBe(text);
+      });
+
+      it('passes with the fake pi and writes the starter entries as before', async () => {
+        const root = tempDir();
+        const { run, err } = withPi(root, FAKE_PI_COMMAND);
+        expect(await run('init', 'm/x')).toBe(0);
+        expect(err).toEqual([]);
+        expect(getAgent(root, 'general')).toMatchObject({ host: 'pi', model: 'm/x', tools: FULL });
+      });
+
+      it('lets init continue when the child driver of the host has no check', async () => {
+        const root = tempDir();
+        const kernel = new Kernel();
+        kernel.registerChildDriver('pi', { port: { start: () => { throw new Error('unused'); } }, starterTools: () => ({ general: ['g'], fallback: ['f'] }) });
+        const { run } = withKernel(root, kernel);
+        expect(await run('init', 'm/x')).toBe(0);
+        expect(getAgent(root, 'general').tools).toEqual(['g']);
+      });
+
+      it('stops with the message of the check of the chosen host only, before writing', async () => {
+        const root = tempDir();
+        const kernel = new Kernel();
+        const starterTools = () => ({ general: ['g'], fallback: ['f'] });
+        const port = { start: () => { throw new Error('unused'); } };
+        kernel.registerChildDriver('pi', { port, starterTools, prerequisites: () => 'pi is not here' });
+        kernel.registerChildDriver('codex', { port, starterTools, prerequisites: () => undefined });
+        const { run, err } = withKernel(root, kernel);
+        expect(await run('init', 'm/x', '--host', 'pi')).toBe(1);
+        expect(err.join('\n')).toContain('pi is not here');
+        expect(existsSync(agentFile(root))).toBe(false);
+        expect(await run('init', 'm/x', '--host', 'codex')).toBe(0);
+      });
+
+      it('keeps the unsupported-host error for a host nobody registered', async () => {
+        const root = tempDir();
+        const { run, err } = withPi(root, [path.join(tempDir(), 'no-such-pi')]);
+        expect(await run('init', 'm/x', '--host', 'acp')).toBe(1);
+        expect(err.join('\n')).toMatch(/"acp".*not supported/);
+        expect(existsSync(agentFile(root))).toBe(false);
+      });
     });
 
     it('refuses naming the host when its child driver offers no starter tools', async () => {

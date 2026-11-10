@@ -3,7 +3,7 @@
 // The registry of the two seams. Child drivers register by host and parent adapters
 // by name; the entry point of each process does the registering. Kernel imports
 // only the shapes of TaskCore, never a particular driver or adapter.
-import type { AttachCommand, ChildDriver, ChildPort, SessionExport, StarterTools } from '../core/types.js';
+import type { AttachCommand, ChildDriver, ChildPort, PrerequisitesCheck, SessionExport, StarterTools } from '../core/types.js';
 
 /** A host with no registered child driver; names the host and every supported host. */
 export class UnsupportedHostError extends Error {
@@ -60,6 +60,11 @@ export class Kernel {
 
   starterTools(host: string): StarterTools | undefined {
     return this.driver(host).starterTools?.();
+  }
+
+  /** Undefined when the driver of the host offers none; the caller then has nothing to check. */
+  prerequisites(host: string): PrerequisitesCheck | undefined {
+    return this.driver(host).prerequisites;
   }
 
   private driver(host: string): ChildDriver {

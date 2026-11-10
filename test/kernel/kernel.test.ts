@@ -80,6 +80,23 @@ describe('Kernel', () => {
     expect(kernel.starterTools('bare')).toBeUndefined();
   });
 
+  it('offers the prerequisites check of a host only when its driver has one', () => {
+    const kernel = new Kernel();
+    const check = () => 'pi is missing';
+    kernel.registerChildDriver('pi', driver({ prerequisites: check }));
+    kernel.registerChildDriver('bare', driver());
+    expect(kernel.prerequisites('pi')).toBe(check);
+    expect(kernel.prerequisites('pi')?.()).toBe('pi is missing');
+    expect(kernel.prerequisites('bare')).toBeUndefined();
+  });
+
+  it('refuses the prerequisites check of an unsupported host with the same error', () => {
+    const kernel = new Kernel();
+    kernel.registerChildDriver('pi', driver());
+    expect(() => kernel.prerequisites('x')).toThrow(UnsupportedHostError);
+    expect(() => kernel.prerequisites('x')).toThrow(/"x".*supported hosts: pi/s);
+  });
+
   it('refuses every lookup for an unsupported host with the same error', () => {
     const kernel = new Kernel();
     kernel.registerChildDriver('pi', driver());

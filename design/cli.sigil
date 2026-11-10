@@ -4,6 +4,7 @@
 @design/task-core.sigil from TaskCore import {
     task, task id, brief, child run, result, transcript, launch spec, attach command,
   session export, child driver, child session, starter tools,
+  prerequisites check,
 }
 @design/agent-config.sigil from AgentConfig import {
     project root, unknown agent error, load error, general agent, fallback agent,
@@ -44,7 +45,11 @@ component Cli {
     options, a host, a timeout that defaults to 1200 seconds and a thinking level
     that defaults to medium, where the host option may be left out when exactly one
     supported host is registered, and ask the driver registry for the
-    starter tools of the child driver of that host. Then ask AgentConfig to add the
+    prerequisites check of the child driver of that host and run it, when it
+    offers one, before anything is written: when it returns a message, print the
+    message to stderr and exit non-zero with every file unchanged. Then ask the
+    driver registry for the starter tools of that child driver, and ask
+    AgentConfig to add the
     starter entries to the agent file under the project root that the delegation
     service resolved: the default tier with that host, that model and that
     thinking level, a general agent with the tool list for a general agent and a
@@ -116,6 +121,11 @@ component Cli {
     no agent name runs the general agent. Subzero init with the host pi, in an
     agent file whose default tier is on the host claude, prints the error that
     names both hosts, exits non-zero and writes nothing.
+
+    Subzero init with the host pi, when the prerequisites check of its child
+    driver returns a message that says pi was not found, prints that message,
+    exits non-zero and writes no agent file. When that child driver offers no
+    prerequisites check, init goes on.
 
     Subzero init in a project with no agent file creates the agent file with a
     default tier on the one registered host, the given model and the thinking level

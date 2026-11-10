@@ -1,5 +1,6 @@
 @design/task-core.sigil from TaskCore import {
   child driver, child port, attach command, session export, starter tools,
+  prerequisites check,
 }
 @design/delegation-service.sigil from DelegationService import { delegation }
 
@@ -49,7 +50,7 @@ component Kernel {
     No core service may name a particular child driver or parent adapter, or import
     from one. A core service reaches a child driver only through the child port
     that Kernel provides for a host, and the attach command, the session export and
-    the starter tools that it offers.
+    the starter tools and the prerequisites check that it offers.
   }
 
   cases {
@@ -60,6 +61,11 @@ component Kernel {
     A request for the child port of a host with no registered child driver returns
     an error that names that host and lists every supported host, and it starts no
     child run.
+
+    A request for the prerequisites check of the host pi returns the check of its
+    child driver, or nothing when that child driver offers none, and a request for
+    that of a host with no registered child driver returns the same error as for a
+    child port.
 
     A second child driver registered for the host pi is refused with an error that
     names pi, and the first child driver stays registered.
@@ -77,8 +83,9 @@ component Kernel {
     child driver for the same host.
 
     Provide the child port of the child driver registered for a host, and its
-    attach command, its session export and its starter tools when that child driver
-    offers them, and return an error that names the host and lists every
+    attach command, its session export, its starter tools and its prerequisites
+    check when that child driver offers them, and return an error that names the
+    host and lists every
     supported host when no
     child driver is registered for it.
 

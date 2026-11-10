@@ -171,10 +171,11 @@ component TaskCore {
     from the launch spec of the task, a *session export* that writes the
     child session of a task as a document that a person can read, and its
     *starter tools*, which are the tool list that suits a general agent on its host
-    and the tool list that only reads and suits a fallback agent on its host. A
-    caller must ask for any of the three through the child driver of the host of
-    the
-    task or of the agent, and must not assume that a child driver offers it.
+    and the tool list that only reads and suits a fallback agent on its host, and
+    a *prerequisites check*, which passes or returns a message that says what its
+    host lacks and what to do. A caller must ask for any of the four through the
+    child driver of the host of the task or of the agent, and must not assume
+    that a child driver offers it.
   }
 
   decisions {
