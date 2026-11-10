@@ -70,6 +70,31 @@ The same skill works in pi without Claude:
 ./demo.sh pi src/cart.py     # interactive pi, replies with the findings
 ```
 
+## Compound-engineering review (tier routing)
+
+`./demo.sh ce` opens Claude Code with the subzero and compound-engineering
+plugins and prints the line to type, `/ce-code-review base:<baseline> depth:full`
+(`setup` makes the copy a git repository with an empty baseline commit, so CE
+has a diff to review). The agent file holds a `medium` tier, a `general` agent and
+a read-only `fallback`. At session start subzero tells Claude to send CE's
+mid-tier subagents to `delegate` with `tier: "medium"`, and a PreToolUse hook on
+the Agent tool redirects any generic spawn for that tier that slips past.
+Session-model and cheapest-capable reviewers stay on Claude, because no `large`
+or `small` tier is configured. `./demo.sh tasks` shows the routed reviewers as
+`general:medium`. How this works: [docs/design.md](../../docs/design.md) §5.4.
+
+Known limits:
+
+- **Plan mode is not respected.** The hook does not read the session's
+  permission mode, so a generic subagent spawned in plan mode is still sent to
+  the `general` agent, which can write files and run shell commands inside pi,
+  outside Claude Code's permission prompts. Do not rely on plan mode to keep a
+  routed subagent read-only; run the demo from its copy.
+- If the subzero server fails to start, the session-start text still says routing
+  is on, but the hook denies nothing and every subagent runs on Claude.
+- Worktree-isolated and fork spawns always stay on Claude: a subzero child works
+  in the shared checkout.
+
 ## Notes
 
 - `./demo.sh` passes the allow rules for the subzero tools and `REVIEW.md` on the
