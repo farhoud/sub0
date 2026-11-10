@@ -368,7 +368,7 @@ option), instead of wrapping everything.
 | R11 | Unclear whether `grep`/`find` tools fetch `rg`/`fd` binaries over the network under `--offline` ⚠ | Check in the spike; fall back to `--tools read,ls,bash` |
 | R12 | A skill bundle may not fit a local model's context. The interpreter child loads sigil-understand (whose language reference alone is ~57 KB) and sigil-egglog, plus the prepared request. Compaction mid-reading could drop the rules it is following. | Measure peak child context with `get_session_stats` in the spike. Record compactions as an event. If it does not fit, that is a finding about the bundle, not a subzero bug. |
 | R13 | Routing: a skill asks for a "fresh sub-agent" and the host picks its own mechanism instead of `delegate` | Routing lines in the native subagent's prompt (§6.1). Inside a Claude subagent there is no Agent tool, so `delegate` is the only option (⚠ re-check). In the main conversation, a `PreToolUse` hook on the Agent tool is the fallback. |
-| R14 | A child's real output is bigger than the reply budget (e.g. sigil-write's review report, once sigil-write is delegated to) | `result.report_file` (v0.1): the child writes the full output to a file in the task record; the result carries a summary and the path. Not needed in the spike: the interpreter's output is its answer file. |
+| R14 | A child's real output is bigger than the reply budget (e.g. sigil-write's review report, once sigil-write is delegated to) | `result.report_file` (v0.2): the child writes the full output to a file in the task record; the result carries a summary and the path. Not needed in the spike: the interpreter's output is its answer file. |
 
 ## 6. Spike plan (about 1 week)
 
@@ -535,7 +535,7 @@ Usefulness:
 - B's planted-problem scores and review findings sit in one table beside A's. The benchmarks set no
   threshold; whether B is good enough is decided from that table, and the decision is written down.
 
-**Not in the spike** (moved to v0.1): `continue`, `ask` (probe fork), `fork`, `rerun` and `report`;
+**Not in the spike** (moved to v0.2): `continue`, `ask` (probe fork), `fork`, `rerun` and `report`;
 nested delegation inside subzero (a pi child that delegates, D14); `result.report_file`; generating
 `.claude/agents/*.md` from `host: native`; and sigil-write. Each interpreter call is one fresh turn, so
 none of these are needed to answer the spike's question.
@@ -555,7 +555,7 @@ none of these are needed to answer the spike's question.
   leave the mechanism to the host. subzero routes those calls to configured agents (R13). This is a
   third trigger next to `delegate` and the proxy skill. It also gives Claude Code subagents, which
   can't start subagents themselves, a way to delegate.
-- **`result.report_file`** for agents whose full output the caller needs (R14, v0.1).
+- **`result.report_file`** for agents whose full output the caller needs (R14, v0.2).
 - **A child's permissions are a tool allow-list for pi.** pi has no approval prompts, so
   `needs_input` (kind `permission`) only happens through subzero's own pi extension.
 - **The brief is the first user message, not part of the system prompt.** This keeps resume and
@@ -563,6 +563,6 @@ none of these are needed to answer the spike's question.
 - **No detached children.** Children die with the server through stdin EOF, and their sessions are
   kept for resume.
 - **Nested delegation can wait.** Running the evaluator as a native Claude subagent keeps every subzero child at depth 1. When a
-  delegated child does need to delegate (v0.1), it gets subzero's pi extension (the only exception to
+  delegated child does need to delegate (v0.2), it gets subzero's pi extension (the only exception to
   `-ne`) via `delegates:`, nested children share the parent's parallel limit, and a waiting run
   lends its place under that limit to its child so depth 2 can't deadlock on one GPU (D14).

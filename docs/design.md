@@ -191,7 +191,7 @@ stateDiagram-v2
   Idle --> Running: continue(message) — respawn if no live run
   Failed --> Running: continue(message) — retry in the same session
   Cancelled --> Running: continue(message)
-  Abandoned --> Running: continue(message) (v0.1)
+  Abandoned --> Running: continue(message) (v0.2)
   Idle --> Archived: retention / prune
   Failed --> Archived
   Cancelled --> Archived
@@ -318,7 +318,7 @@ defaults:                    # agent defaults; host, model and thinking come onl
   permissions: read-only     # read-only | workspace-write | full  (what it may do there; D8)
   timeout: 1800              # example value. Spike: required, in seconds, wall-clock from spawn to settlement,
                              # including skill verification; time spent Pending does not count.
-                             # An idle limit (`idle:`) is v0.1.
+                             # An idle limit (`idle:`) is v0.2.
   process: exit              # exit (kill when the task ends) | keep (stay alive for follow-ups, ttl)
   record: keep               # keep (host session + run record kept) | none (nothing written)
   retention: 30d
@@ -330,12 +330,12 @@ skills:                      # paths are relative to this file; bare names fall 
 endpoints:                   # named model endpoints, defined once and reused. An agent definition belongs to the
                              # endpoint named by the part of its model before the first slash (`local/qwen3-coder-30b`)
   local:
-    base_url: http://localhost:8000/v1   # v0.1; in the spike pi's own models.json holds the server
-    api: openai-completions              # v0.1: what the child host must speak
-    api_key: ${LOCAL_API_KEY}            # v0.1
+    base_url: http://localhost:8000/v1   # v0.2; in the spike pi's own models.json holds the server
+    api: openai-completions              # v0.2: what the child host must speak
+    api_key: ${LOCAL_API_KEY}            # v0.2
     parallel: 1              # cap on children this process runs at once on this endpoint, shared by every agent
                              # definition on it. Spike: an entry must hold a positive whole number, and an endpoint with no
-                             # entry has no cap. v0.1: optional once an entry has other fields. An entry that no
+                             # entry has no cap. v0.2: optional once an entry has other fields. An entry that no
                              # tier or override model belongs to is a load error
 
 models:
@@ -371,7 +371,7 @@ agents:
       Answer with a concise summary first, then details.
     tools: [read, grep, find, bash]   # host-neutral allow-list, mapped per host
     permissions: read-only   # read-only | workspace-write | full  (maps to host sandbox flags)
-    delegates: []            # agents this child may delegate to (nested; D14, v0.1). Empty = no delegate tool
+    delegates: []            # agents this child may delegate to (nested; D14, v0.2). Empty = no delegate tool
     result: { report_file: false }  # true: full output goes to a file; the result carries summary + path
     output:
       schema: ./schemas/semantic-model.json   # optional structured result
@@ -488,7 +488,7 @@ directly. That skips subzero and brings back the context pollution. So:
   `default` tier to a file that already holds agents. It refuses, naming both hosts, when the file has a `default` tier on another host; it also refuses when the host is missing and several are registered, when the host is not supported, and when the host's child driver offers no starter tools.
 - **Endpoints.** An endpoint is defined once under `endpoints:` and reused by every agent definition whose model starts
   with its name, so they share its `parallel` limit. In the spike an entry holds only `parallel`; its
-  `base_url`, `api` and `api_key` join it in v0.1, replacing the former `models:` endpoint entries.
+  `base_url`, `api` and `api_key` join it in v0.2, replacing the former `models:` endpoint entries.
 - **Parallel limit.** The Delegation service counts only the children of its own process that are
   `Starting` or `Live`. Past the limit a delegation stays `Pending` and is released first come first served
   when one ends, whether it settles, fails or is cancelled. A second process or window is not counted, and

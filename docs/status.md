@@ -10,7 +10,12 @@ sources that do different jobs:
   documents they win.
 - **The target** is [design.md](design.md), [decisions.md](decisions.md) (its
   "Suggested phasing" section) and [problem.md](problem.md). They describe the
-  whole product, most of which is planned for v0.1 and later.
+  whole product, most of which is planned for v0.2 and later.
+
+**Versions.** v0.1 is the preview release (`0.1.0-preview.N`): the spike, tiered
+routing and the plugin distribution, which is what this repository builds
+today. v0.2 starts the task model with `continue` and `ask`, and the later
+milestones follow the phasing in decisions.md.
 
 The three plans in [plans/](plans/) record what each piece of work set out to
 do, what it deferred, and how it was checked.
@@ -24,9 +29,9 @@ do, what it deferred, and how it was checked.
 | Tiered subagent routing for compound-engineering | Built and accepted in the R17 live run and its probes. |
 | Plugin distribution (`subzero@qoherent`) | Built and tested locally. Not yet released: the repository transfer, the first tag and the walkthroughs are still to do. |
 | Spike experiment (A/B on sigil-evaluate) | Partly run. Planned passes are missing and no go/no-go decision has been written. |
-| v0.1 and later (task model, config layering, other hosts) | Not started. |
+| v0.2 and later (task model, config layering, other hosts) | Not started. |
 
-Tests: 23 files, 366 tests pass (`npm test`), with typecheck and build clean.
+Tests: 23 files, 367 tests pass (`npm test`), with typecheck and build clean.
 
 ## What is implemented
 
@@ -99,7 +104,7 @@ The distribution work added:
 - The manual review-quality table is empty.
 - In the plumbing checks, several live checks are still "pending": R3, the
   orphan check of R4, R5, the attach check of R7, and R9 and R10.
-- The go/no-go paragraph for v0.1 is empty. The user writes it.
+- The go/no-go paragraph for v0.2 is empty. The user writes it.
 
 **Small loose end**
 - The demo files name the `r9700` endpoint on purpose. The R17 run used a
@@ -142,12 +147,12 @@ From the distribution plan:
 - an automated install check of the release zip;
 - slash commands for `show` and `attach`.
 
-### 4. The rest of the design (v0.1 and later)
+### 4. The rest of the design (v0.2 and later)
 
 The spike plan left these out on purpose. They come from design.md and the
 phasing in decisions.md, and none of them is built.
 
-**v0.1**
+**v0.2**
 - The rest of the task model: `continue` (with respawn), `ask` (read-only probe
   fork), `fork`, `rerun` and the report (design.md §3.5, §6.3). The MCP server
   has four of the six tools in §5.1 (`continue` and `ask` are missing), and
@@ -171,12 +176,12 @@ phasing in decisions.md, and none of them is built.
 - sigil-write as the second workload.
 - A Codex child driver.
 
-**v0.2**
+**v0.3**
 - A Claude child driver.
 - The pi parent extension and the Codex parent plugin.
 - Persistent sessions and follow-ups.
 
-**v0.3**
+**v0.4**
 - A generic ACP child driver.
 - Worktree mode.
 - Structured outputs on every host.

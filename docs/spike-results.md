@@ -2,7 +2,7 @@
 # subzero spike: results
 
 This document holds the measurements of the spike and the decision on whether to
-build subzero v0.1. Plan: [docs/plans/2026-11-02-1109-feat-subzero-spike-plan.md](plans/2026-11-02-1109-feat-subzero-spike-plan.md).
+build subzero v0.2. Plan: [docs/plans/2026-11-02-1109-feat-subzero-spike-plan.md](plans/2026-11-02-1109-feat-subzero-spike-plan.md).
 Harness: [bench/README.md](../bench/README.md).
 
 ## Measurements
@@ -116,4 +116,4 @@ Plan: [docs/plans/2026-11-06-0953-feat-tiered-subagent-routing-plan.md](plans/20
 
 ## Decision
 
-_Written by the user, citing the table above: build subzero v0.1 or not, and why._
+_Written by the user, citing the table above: build subzero v0.2 or not, and why._
