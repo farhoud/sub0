@@ -144,8 +144,9 @@ make each choice explicitly.
    proxy skills, generated `host: native` subagents (D12), skill manifests (`agents/subzero.yaml`,
    D17), `result.report_file`, sigil-write as the second workload (writer → evaluator → interpreters),
    Codex child driver.
-4. **v0.3:** Claude child driver (bare and non-bare auth paths), persistent sessions and follow-ups,
-   pi parent extension, Codex parent plugin.
+4. **v0.3:** Claude child driver (bare and non-bare auth paths), pi parent extension, Codex parent
+   plugin. (Child sessions are already kept, since v0.1; follow-ups through `continue` and a kept-alive
+   process, `process: keep`, are v0.2.)
 5. **v0.4:** generic ACP driver, worktree mode, structured outputs everywhere, plus D12 (compile to
    native) if it is worth it.
 

@@ -97,6 +97,15 @@ The distribution work added:
   executable-grade configuration. It was added as the conservative default and
   needs the user's confirmation.
 
+**Open problems**
+- A newcomer cannot easily run `subzero show` or `subzero attach`. The plugin
+  puts no `subzero` command on the user's PATH, and the distribution plan
+  deferred slash commands for both (`attach` follows a live child and suits a
+  terminal; `show` opens an exported page). For now the README says to run them
+  as `node <checkout>/dist/cli.js show <task id>` (or `attach`) from a built
+  checkout of this repository, and gives plain `pi` commands for reading a child
+  session.
+
 **Spike experiment (spike plan U8)**
 - Not all planned passes were run. The plan asked for three passes each of A and
   B and one each of B-low, A-cheap and B-control. The table holds one A pass,
@@ -179,7 +188,6 @@ phasing in decisions.md, and none of them is built.
 **v0.3**
 - A Claude child driver.
 - The pi parent extension and the Codex parent plugin.
-- Persistent sessions and follow-ups.
 
 **v0.4**
 - A generic ACP child driver.
