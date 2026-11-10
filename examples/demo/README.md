@@ -24,7 +24,7 @@ inverted session-expiry check, a predictable token, a 0-based month and
 
 - Build subzero once: `npm run build` in the repository root.
 - pi has the `r9700` provider in `~/.pi/agent/models.json`, and the model server is up:
-  `curl http://100.94.75.13:8216/health`.
+  `curl http://<model-server>:8216/health`.
 - Copy the demo out of the repository and work in the copy:
   `./demo.sh setup` (to `~/subzero-demo`, or `./demo.sh setup <dir>`), then
   `cd ~/subzero-demo`. Claude Code will not write files inside a folder loaded

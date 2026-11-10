@@ -25,7 +25,7 @@ const SECTION_TITLE = 'After the transfer to qoherent/sub0';
 // Until the first release the plugin installs from the `plugin` branch of the repository where it
 // lives now. The README names that repository only in its install commands; the after-the-transfer
 // checklist says to change them.
-const INSTALL_REPO = 'farhoud/subzero';
+const INSTALL_REPO = 'qoherent/sub0';
 
 /** The text of one `## ` section, up to the next `## ` heading or the end. */
 function sectionRaw(text: string, title: string): string {
@@ -100,7 +100,7 @@ describe('README.md', () => {
     const order = [
       /^## .*(preview|limits)/im,
       /^## Prerequisites/m,
-      /claude plugin marketplace add farhoud\/subzero@plugin/,
+      /claude plugin marketplace add qoherent\/sub0@plugin/,
       /claude plugin install subzero@qoherent/,
       /\/subzero:init <model>/,
       /^## .*(Confirm|Test)/im,

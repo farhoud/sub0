@@ -5,7 +5,7 @@ through a marketplace named `qoherent`:
 
 - **Now, from git:** the `plugin` branch of this repository holds the built plugin
   and its own marketplace file. Users add it with
-  `claude plugin marketplace add farhoud/subzero@plugin`. You publish it by hand,
+  `claude plugin marketplace add qoherent/sub0@plugin`. You publish it by hand,
   as the second part below describes.
 - **Later, from releases:** a tagged release attaches a built, plugin-only zip, and
   the catalog is `.claude-plugin/marketplace.json` on the default branch. The
@@ -119,7 +119,7 @@ the branch.
 4. Check from a clean profile:
 
    ```sh
-   claude plugin marketplace add farhoud/subzero@plugin
+   claude plugin marketplace add qoherent/sub0@plugin
    claude plugin install subzero@qoherent
    ```
 
@@ -186,9 +186,8 @@ catalog, so nobody can install yet.
 - Confirm `package.json` `repository` names `qoherent/sub0`, and search the docs
   and the demo for the old owner and name, `farhoud/subzero`, and for the folder
   name `spike-with-sigil`. Change what you find, including the install commands
-  in `README.md`, which name the `plugin` branch of the old repository until the
-  first release exists. GitHub redirects the old name after the transfer, so those
-  commands keep working until you change them. Users who installed from the branch
+  in `README.md`, which name the `plugin` branch of `qoherent/sub0`. GitHub
+  redirects the old name after the transfer, so links to it keep working. Users who installed from the branch
   must run `claude plugin marketplace remove qoherent` before they add the
   release marketplace, because both use the name `qoherent`.
 - Confirm the marketplace name `qoherent` is free, that no local test copy is still
