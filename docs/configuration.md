@@ -1,0 +1,311 @@
+# Configuring subzero
+
+subzero reads one file per project, `.agents/subzero.yaml`. It says which models
+the children run on, which agents you can ask for by name, and how routing
+behaves. This page is the full reference for that file, for version
+`0.1.0-preview.1`. The README has the short path: install, run
+`/subzero:init <model>`, add a `medium` tier.
+
+What is documented here is what the code accepts today. The design in
+[design.md](design.md) §4 describes more (layering, skill manifests, endpoint
+connection fields). Those parts are not built; see
+[Not supported yet](#not-supported-yet).
+
+## Where the file lives
+
+- The file is `.agents/subzero.yaml` under the project root. It is meant to be
+  committed with the project.
+- The project root is `SUBZERO_PROJECT_DIR`, which the plugin sets to the folder
+  Claude Code was opened in. From the command line it is the working directory.
+- The file is read again on every delegation, so an edit applies to the next
+  task without restarting Claude Code. The session-start routing text is built
+  once per session, so after you add or remove a tier, start a new session.
+- A missing, unreadable or malformed file, or any invalid entry, is a load error.
+  It fails the whole load and starts no task; the error names the entry and the
+  problem.
+- The folder `.agents/subzero/` next to it is subzero's own store (task records,
+  the task index and child sessions). It is created owner-only and ignores
+  itself in git. Do not put skills or configuration in it.
+
+A project with no agent file is not an error for the plugin: the hooks do
+nothing, no routing text is added and every subagent runs on Claude.
+
+## A complete example
+
+```yaml
+skills:
+  file-facts: ../subzero-skills/file-facts
+
+endpoints:
+  local:
+    parallel: 1
+
+models:
+  tiers:
+    default: { host: pi, model: local/qwen3-coder-30b, thinking: low }
+    small:   { host: pi, model: local/qwen3-4b, thinking: off }
+    medium:  { host: pi, model: local/qwen3-coder-30b, thinking: medium }
+
+routing:
+  hook: true
+  generic_agents: [general-purpose, claude]
+
+agents:
+  general:
+    tools: [read, bash, edit, write, grep, find, ls]
+    timeout: 1200
+  fallback:
+    tools: [read, grep, find, ls]
+    timeout: 1200
+  file-facts:
+    description: Reports three facts about one source file.
+    skills: [file-facts]
+    tools: [read, grep, find, ls]
+    timeout: 120
+    tier: medium
+    tiers:
+      medium: { thinking: high }
+```
+
+The top-level keys are `skills`, `endpoints`, `models`, `routing` and `agents`.
+Every one is optional, but an `agents:` map with any entry needs a `default` tier.
+
+## `models.tiers`: what runs a child
+
+A tier names a host, a model and a thinking level. It is the only place that
+says what runs a child; agents never set these themselves.
+
+```yaml
+models:
+  tiers:
+    default: { host: pi, model: local/qwen3-coder-30b, thinking: medium }
+    medium:  { host: pi, model: local/qwen3-coder-30b, thinking: low }
+```
+
+| Key | Required | Meaning |
+|---|---|---|
+| `host` | yes | The kind of child. `pi` is the only host that exists in this preview. |
+| `model` | yes | `provider/model`, as `pi --list-models` shows it. The part before the first slash is the **endpoint** that the parallel limit counts. |
+| `thinking` | yes | One of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. It is passed to pi's `--thinking`. |
+
+Rules:
+- `default` is required as soon as `agents:` holds an entry. `subzero init` adds
+  it for you.
+- A tier name is free text. The names `small`, `medium` and `large` have a
+  meaning for routing (below); other names work only when a request names them.
+- A tier whose host has no child driver still loads. It fails only when a
+  request uses it, with an error that names the tier, the host, the supported
+  hosts and the configured tiers.
+- Any other key in a tier is an error.
+
+## `agents`: what you can ask for by name
+
+```yaml
+agents:
+  file-facts:
+    description: Reports three facts about one source file.
+    skills: [file-facts]
+    tools: [read, grep, find, ls]
+    timeout: 120
+    tier: medium
+    tiers:
+      medium: { thinking: high }
+```
+
+| Key | Required | Meaning |
+|---|---|---|
+| `description` | yes, except on `general` and `fallback` | What the agent is for. It is not shown to Claude in this preview (see [Limits](#limits)). On `general` and `fallback` a description is an error. |
+| `tools` | yes | The pi tools the child may use, at least one: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`. Passed to pi's `--tools`. subzero does not check the names. |
+| `timeout` | yes | Seconds from the child's start until it settles. Time spent waiting in the queue does not count. A child past it is stopped and the task fails with `timeout`. |
+| `skills` | no | Names from the top-level `skills:` map. Default none. |
+| `tier` | no | The agent's own tier when a request names none. Must exist in `models.tiers`. Default `default`. |
+| `tiers` | no | Per-tier overrides of `host`, `model` and `thinking` for this agent only, field by field. Each key must be a configured tier. |
+
+Rules:
+- `host`, `model` and `thinking` cannot be set on an agent. Put them in a tier,
+  or override them with `tiers:`.
+- Any key not in the table is an error.
+- An agent name is free text; `general` and `fallback` are the two special names.
+
+### `general`
+
+The agent for work that names no agent, and for tiered work (CE's generic
+subagents). A request with no agent runs it on `default`; a request that names a
+tier runs it on that tier and is recorded as `general:<tier>`. Give it the full
+tool list if routed subagents must write files or run commands, as
+compound-engineering's reviewers do. Without a `general` entry, a request that
+names no agent is an error and no tier is routable.
+
+### `fallback`
+
+Runs a request whose agent name is not configured. Its reply starts with a
+notice that the named agent is not configured and lists the configured ones.
+`init` writes it read-only, so a mistyped name cannot write files or run
+commands. Without a `fallback` entry, an unknown name is an error and makes no
+task. Naming `general` when there is no `general` entry is that same error; it
+never runs `fallback`.
+
+### Resolving an agent to a model
+
+For a request, the tier is the first of:
+1. the tier the request names (`tier` on `delegate`, or the tier word Claude
+   chose);
+2. the agent's own `tier:`;
+3. `default`.
+
+Then the agent's `tiers.<tier>` override, if any, is laid over that tier's
+fields. The result is the host, model and thinking of the child. A request that
+names a tier records the task as `<agent>:<tier>`, for example `general:medium`.
+
+## `skills`: folders an agent loads
+
+```yaml
+skills:
+  file-facts: ../subzero-skills/file-facts
+```
+
+Each entry maps a skill name to a folder, resolved against the folder that holds
+the agent file (`.agents/`). The folder holds a `SKILL.md` as for any Agent
+Skill. A child loads only the skills its agent lists, copied into its task
+folder when it starts; a task keeps the copy it started with.
+
+- An agent that lists a skill missing from this map fails the whole load.
+- A skill folder that does not exist fails the task as `skill_mismatch` before
+  the child starts work. So does a difference between the skills pi loaded and
+  the ones declared.
+- Keep skill folders out of `.claude/skills/` (Claude would load the skill
+  itself) and out of `.agents/subzero/` (git ignores that folder).
+
+## `endpoints`: limits per model server
+
+```yaml
+endpoints:
+  local:
+    parallel: 1
+```
+
+The key is an endpoint name, the part of a model before its first slash
+(`local` in `local/qwen3-coder-30b`). `parallel` is the most children one
+Claude Code session runs at once on it; it must be a positive whole number.
+Past the limit a delegation waits as queued, first come first served, and
+starts when a child ends. A one-GPU model server usually wants `parallel: 1`.
+
+- The count is per session. A second Claude Code window is not counted, and
+  nothing is locked across processes.
+- An endpoint with no entry has no limit.
+- An entry that no tier or tier override uses is a load error, which catches a
+  mistyped endpoint name.
+- An entry holds only `parallel` in this preview. The model server's address and
+  key are in pi's own configuration (`~/.pi/agent/models.json`).
+
+## `routing`: Claude Code subagent routing
+
+```yaml
+routing:
+  hook: true
+  generic_agents: [general-purpose, claude]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `hook` | `true` | `false` keeps the session-start text but lets every Agent spawn through, so Claude's own subagents are never redirected. |
+| `generic_agents` | `[general-purpose, claude]` | The Agent types the hook treats as generic, and so may redirect. A list here replaces the default. |
+
+Both are optional, and any other key is an error. How routing uses the tiers:
+
+- **Tier words.** `small` is "cheapest capable", `medium` is "mid-tier" and
+  `large` is "session model". At session start Claude is told which of these
+  words go to subzero: the ones whose tier is configured and routable. No
+  routable word means no text.
+- **The hook.** A generic Agent spawn is denied, with an instruction to call
+  `delegate`, when the tier its model maps to is configured: `haiku` is
+  `small`, `sonnet` is `medium`, no model is `large`, and `opus` and `fable`
+  never map. Spawns with `isolation`, forks (`subagent_type: "fork"`) and named
+  agent types are not generic and always stay on Claude.
+- **Routable.** A tier is routable when `agents:` holds a `general` entry and its
+  host, after `general`'s override, has a child driver.
+- **Failing open.** The hook denies nothing unless the subzero server is running
+  for the session and the agent file loads.
+
+Adding `large` also moves compound-engineering's session-model reviewers and
+plain "use a subagent" requests. Read
+[what a large tier changes](../README.md#what-configuring-a-large-tier-changes)
+before adding it.
+
+## Writing the file with `init`
+
+```sh
+/subzero:init <model> [--host pi] [--timeout 1200] [--thinking medium]
+```
+
+`init` adds a `default` tier (with that host, model and thinking), a `general`
+agent with the full tool list and a read-only `fallback` agent, each only when the
+file lacks it. It changes no existing line. It refuses and writes nothing when:
+the pi check fails (pi is missing or does not run), the file exists and does not
+load, the file has a `default` tier on another host, or `agents:` or
+`models.tiers` is empty or written in flow style (`{ ... }`), so lines cannot be
+added to it.
+It adds no `small`, `medium` or `large` tier; add those by hand.
+
+## Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `SUBZERO_PROJECT_DIR` | The project root. The plugin sets it from `CLAUDE_PROJECT_DIR`. An empty value counts as unset. Set it when you run `subzero` from outside the project. |
+| `SUBZERO_DATA` | Where the plugin keeps its per-session files (the session id and the readiness marker). Defaults to `CLAUDE_PLUGIN_DATA`, then `~/.subzero`. |
+| `SUBZERO_PI` | The pi command to run instead of `pi` on the PATH. |
+
+Children also run with `PI_OFFLINE=1` and `PI_TELEMETRY=0`. They use your own pi
+login and configuration, so a model that works in `pi` works as a tier.
+
+## Not supported yet
+
+These appear in design.md but are not read by this preview.
+
+- **Unknown top-level keys are ignored, not rejected.** `version:`, `defaults:`
+  and any other key you add do nothing. In particular `defaults.timeout` does
+  not give agents a timeout: every agent needs its own.
+- **Layering.** No `.agents/subzero.local.yaml`, no user file
+  `~/.agents/subzero.yaml`, no `enabled: false`, and no agent definitions that a
+  skill ships (`agents/subzero.yaml`). The one file is the whole configuration.
+- **Skill sources.** Local folders only. No git or npm sources and no
+  `subzero.lock`.
+- **Endpoint fields** `base_url`, `api` and `api_key`; pi's `models.json`
+  holds them.
+- **Agent fields** `instructions`, `permissions`, `delegates`, `expose`,
+  `result`, `output`, `process`, `record`, `retention` and `workspace`; setting
+  one on an agent is an unknown-key error.
+- **Hosts** other than `pi`.
+- **A trust step** for a project's agent file. See below.
+
+## Limits
+
+- **The agent file is executable configuration.** It chooses the models, the
+  tools and the skills of processes that run on your machine, and it can switch
+  routing on. A repository you clone can carry one. subzero does not ask you to
+  trust it first, so use routing only in repositories you trust.
+- **`tools` is the only restriction on a child.** pi has no folder sandbox and
+  asks no permission, so a child with `read` can read any file your user can and
+  one with `bash`, `edit` or `write` can change anything.
+- **Claude does not see your agents.** Names and descriptions are not shown to
+  Claude, so only a request that names an agent runs it.
+- **Each task is one turn.** There is no `continue` or `ask` yet.
+
+## Errors you may see
+
+| Message (start) | Cause and fix |
+|---|---|
+| `agent file is missing` | There is no `.agents/subzero.yaml` under the project root. Run `/subzero:init <model>`. |
+| `agent file is malformed` | The YAML does not parse, or a top-level section has the wrong type. The message says where. |
+| `the default tier is required in models.tiers` | `agents:` has entries but no `default` tier. Add one, or run `init`. |
+| `agent "<name>": description is required` | A named agent has no description. |
+| `<agent>: <key> cannot be set on an agent` | `host`, `model` or `thinking` is on an agent. Move it to a tier. |
+| `<agent>: unknown key "<key>"` | A key this preview does not read. See [Not supported yet](#not-supported-yet). |
+| `<agent>: timeout is required (seconds)` | Every agent needs its own `timeout`. |
+| `<agent>: skill "<name>" is not in the skills map` | Add the skill to the top-level `skills:` map, or fix the name. |
+| `endpoint "<name>": no model of a tier ... belongs to it` | An `endpoints:` entry matches no tier's model. Fix the name. |
+| `unknown agent "<name>"` | The name is not configured and there is no `fallback`. |
+| `unknown tier "<name>"` | A request named a tier that is not in `models.tiers`. |
+| `tier "<name>" runs on the host "<host>"` | The tier's host has no child driver. Use `pi`. |
+| `failure: skill_mismatch` | A declared skill folder is missing, or pi loaded other skills than declared. |
+| `failure: timeout` | The child ran past the agent's `timeout`. Raise it or narrow the task. |

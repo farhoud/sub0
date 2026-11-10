@@ -326,6 +326,11 @@ reuse the child's launch spec, and `attach` is refused while a run is live. The 
 
 ## 4. Configuration (`.agents/subzero.yaml`)
 
+This section is the design. What the code reads today, key by key, with the errors it gives and what is not
+supported yet, is in [configuration.md](configuration.md). The example below includes keys that are not built
+(`version`, `defaults`, endpoint connection fields, agent fields beyond `tools`, `timeout`, `tier`, `tiers`,
+`skills` and `description`); the loader ignores unknown top-level keys and rejects unknown agent keys.
+
 It is modelled on compose: a top-level map of named agents, shared defaults, a skill source map,
 override files, and `${ENV}` interpolation. The `agents:` map may hold two entries without a description, `general` and
 `fallback`; beside it the file holds the `models.tiers` map and the `routing` settings (§4.2).
