@@ -93,23 +93,156 @@ models:
 ```
 
 Start a new Claude Code session in the project, so the session-start hook reads
-the file. Add `small` or `large` the same way to route those tiers too.
+the file. Add `small` or `large` the same way to route those tiers too; read
+[what a `large` tier changes](#what-configuring-a-large-tier-changes) first.
 
 ## Confirm it works
 
-Ask Claude to send a small task to subzero:
+Ask Claude for a mid-tier subagent:
 
 ```text
-Use subzero's delegate tool with tier "medium" to list the files in this folder
-and reply with their names. Wait for the result.
+Use a mid-tier subagent to list the files in this folder and reply with their names.
 ```
 
-Then run `/subzero:tasks`. The task shows as `general:medium`, with its status.
-The reply came from your model, not from Claude.
+Claude sends it to subzero on its own. Then run `/subzero:tasks`: the task shows
+as `general:medium`, with its status. The reply came from your model, not from
+Claude.
 
 To see routing without asking for it, install the compound-engineering plugin and
 run one of its reviews, such as `/ce-code-review`, on a project with changes.
 Its mid-tier subagents appear as subzero tasks in `/subzero:tasks`.
+
+## Usage and prompting guide
+
+subzero routes subagents by model tier. Claude learns at session start which tier
+words go to subzero, and a hook catches a generic subagent spawn for a
+configured tier that slips past. What reaches your model depends on whether the
+request names a tier.
+
+| What you ask Claude | With `default` + `medium` | With `large` added too |
+|---|---|---|
+| "Use a mid-tier subagent to ..." | subzero, `general:medium` | subzero, `general:medium` |
+| "Use the general agent on the medium tier to ..." | subzero, `general:medium` | subzero, `general:medium` |
+| "Use subzero's delegate tool with tier medium to ..." | subzero, `general:medium` | subzero, `general:medium` |
+| "Use a subagent to ..." (no tier) | usually Claude | subzero |
+| "Spawn a general-purpose subagent with the Agent tool ..." | Claude | subzero (the hook redirects it) |
+| A built-in or plugin agent type, such as `Explore` | Claude | Claude |
+
+The table comes from headless runs with Claude Code 2.1.318 and a local model.
+Each cell that says subzero routed every time it was tried; "usually" means the
+plain request went to Claude in two of three runs. The delegate-tool row, and
+`Explore` with `default` + `medium`, follow from how routing works and were not
+run separately.
+
+The rules behind it:
+
+- **Name the tier.** The session-start text gives Claude three phrases:
+  "cheapest capable" for `small`, "mid-tier" for `medium` and "session model"
+  for `large`. A request that uses one of them, or names the tier ("the medium
+  tier"), goes to subzero when that tier is configured.
+- **A request with no tier asks for Claude's own session model,** which subzero
+  files under `large`. It stays on Claude unless `large` is configured.
+- **The hook maps a generic Agent spawn by its model:** `haiku` to `small`,
+  `sonnet` to `medium`, no model to `large`. `opus` and `fable` never route. A
+  spawn whose tier is not configured runs on Claude.
+- **Some spawns always stay on Claude:** named agent types (`Explore`, a
+  plugin's agents), worktree-isolated spawns and forks.
+- **Write the request as a self-contained task.** The child sees only the brief
+  Claude writes, not your conversation, so say which files and what answer you
+  want.
+- **Batches queue.** Several subagents at once go out together and wait for the
+  endpoint's `parallel` limit; `/subzero:tasks` shows each as queued or
+  running.
+
+### Named agents
+
+Besides `general`, you can define your own agents in `.agents/subzero.yaml`,
+with or without skills. An agent with a skill runs a pi child that has only that
+skill loaded: the skill's instructions and files stay in the child, and Claude
+gets only the reply.
+
+```yaml
+skills:                      # skill name -> folder, relative to .agents/
+  file-facts: ../subzero-skills/file-facts
+
+agents:
+  file-facts:
+    description: Reports three facts about one source file.
+    skills: [file-facts]     # names from the skills map; leave out for no skills
+    tools: [read, grep, find, ls]
+    timeout: 120             # seconds, required
+    tier: medium             # optional; without it the agent runs on default
+```
+
+A skill folder holds a `SKILL.md`, as for any Agent Skill. Keep it out of
+`.claude/skills/`, or Claude loads the skill itself and nothing is delegated.
+Keep it out of `.agents/subzero/` too, because that folder ignores itself in git.
+A folder of its own, such as `subzero-skills/`, works.
+
+Ask for the agent by name:
+
+```text
+Use the file-facts agent on app.py and show me its reply.
+```
+
+Claude calls `delegate` with `agent: "file-facts"`, and `/subzero:tasks` shows the
+task as `file-facts`. In headless runs with Claude Code 2.1.318, every request
+that named the agent ran it, with or without a skill, and the child's reply
+followed the skill's format. The agent file is read again on each delegation,
+so a new agent works without restarting Claude Code.
+
+Limits of named agents in this preview:
+
+- **Claude does not see your agents.** Their names and descriptions are not
+  shown to Claude, so only a request that names the agent runs it. A request
+  that fits the description but does not name the agent goes to `general` (or
+  stays on Claude), even when the description matches it word for word. Listing
+  agents for Claude is planned for v0.2.
+- **A misspelled name runs `fallback`.** The reply starts with a notice that the
+  agent is not configured and lists the configured agents. Without a `fallback`
+  entry it is an error and no task is made.
+- **A skill missing from the `skills` map fails the whole file to load**, so no
+  delegation runs until it is fixed. A skill folder that does not exist fails
+  the task as `skill_mismatch` before the child starts work.
+- **Skills are local folders only.** Git sources, a lock file, skills that ship
+  their own agent definition, and per-user or local override files are planned
+  for v0.2.
+- **The child copies the skill when it starts.** A task keeps the version of the
+  skill it started with; an edit applies to the next task.
+- **`tools` is the only restriction on a child.** pi has no folder sandbox, so a
+  child with `read` can read any file your user can, and one with `bash`,
+  `edit` or `write` can change anything. There is no permission prompt.
+- **Each task is one turn.** You cannot continue a named agent's task or ask it
+  a follow-up question yet; a new request starts a new child. `continue` and
+  `ask` are planned for v0.2.
+- **The child sees only the brief.** It does not see your conversation, so the
+  request must say which files and what answer you want.
+
+### What configuring a large tier changes
+
+Adding `large` to `models.tiers` makes subzero take every generic subagent that
+does not name a smaller model, not only the work you ask for by tier. Before you
+add it, know what moves:
+
+- **Plain "use a subagent" requests** go to your model in that project, in every
+  session, without a tier word.
+- **compound-engineering's session-model work moves too.** In `/ce-code-review`
+  the correctness, security and adversarial reviewers run on the session model,
+  which compound-engineering chooses on purpose for its hardest lenses. With
+  `large` configured they run on your model, so a weaker model can miss the
+  findings these reviewers exist to catch.
+- **More children share one endpoint.** Every routed subagent waits for the
+  endpoint's `parallel` limit. With `parallel: 1`, a review that used to run its
+  session-model reviewers on Claude beside the routed ones now runs them all one
+  after another on your model, and takes longer.
+- **The known limits reach more spawns.** Plan mode is still not respected, and
+  the `general` agent still writes files and runs commands inside pi outside
+  Claude Code's prompts. With `large` that applies to most subagents.
+
+To undo it, remove the `large` line from `.agents/subzero.yaml` and start a new
+Claude Code session. Use a separate model for `large` only if it can do the
+session model's work; otherwise route `small` and `medium` and keep `large` on
+Claude.
 
 ## Look at what a child did
 
